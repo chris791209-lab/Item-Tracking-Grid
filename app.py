@@ -7,126 +7,166 @@ import io
 # ==========================================
 st.set_page_config(page_title="Program Items Generator", layout="wide")
 st.title("🎃 萬聖節專案 Program Items 自動生成工具")
-st.markdown("請分別上傳「主資料表」與「CATEGORY對照表」，系統將自動合併並生成標準格式的 Program Items 表單。")
+st.markdown("請上傳專案檔案 (可一次選取/拖曳多個檔案)。系統將自動解析 Master Sheet 的卡片資料，並結合 Data 表的 Subclass Name。")
 
 # ==========================================
-# 2. 建立雙檔案上傳區塊
+# 2. 單一檔案上傳區塊 (支援多檔同時上傳)
 # ==========================================
-col1, col2 = st.columns(2)
-with col1:
-    file_main = st.file_uploader("📁 1. 上傳【主資料表】(Excel 格式)", type=["xlsx", "xls"])
-with col2:
-    file_cat = st.file_uploader("📁 2. 上傳【CATEGORY對照表】(Excel/CSV 格式)", type=["xlsx", "xls", "csv"])
+uploaded_files = st.file_uploader("📁 請上傳 Excel / CSV 檔案 (可同時上傳 Master Sheet 與 Data)", 
+                                  type=["xlsx", "xls", "csv"], 
+                                  accept_multiple_files=True)
 
 st.divider() 
+
+# 數值清理函數 (避免 Excel 將 34287 讀成 34287.0)
+def clean_val(v):
+    s = str(v).strip()
+    if s.endswith('.0'):
+        s = s[:-2]
+    return s if s != 'nan' else ""
 
 # ==========================================
 # 3. 核心處理邏輯
 # ==========================================
-# 必須兩個檔案都上傳後，才會顯示後續的工作表選擇與執行按鈕
-if file_main and file_cat:
+if uploaded_files:
+    # 建立所有可用工作表的選單
+    sheet_options = []
+    df_dict = {}
     
-    # --- 讀取主資料表的工作表 ---
-    xls_main = pd.ExcelFile(file_main)
-    sheet_names_main = xls_main.sheet_names
-    default_idx_main = 0
-    for i, s in enumerate(sheet_names_main):
-        if 'ITEM' in s.upper() or 'HWLN' in s.upper() or 'PROGRAM' in s.upper():
-            default_idx_main = i
-            break
-            
-    # --- 讀取 CATEGORY對照表 的工作表 (若為 CSV 則略過) ---
-    if file_cat.name.endswith(('.xlsx', '.xls')):
-        xls_cat = pd.ExcelFile(file_cat)
-        sheet_names_cat = xls_cat.sheet_names
-        default_idx_cat = 0
-        for i, s in enumerate(sheet_names_cat):
-            if 'DATA' in s.upper():
-                default_idx_cat = i
-                break
-    else:
-        sheet_names_cat = ["CSV 檔案 (預設)"]
-        default_idx_cat = 0
+    with st.spinner("讀取檔案結構中..."):
+        for file in uploaded_files:
+            if file.name.endswith('.csv'):
+                df = pd.read_csv(file, header=None)
+                name = f"[{file.name}] CSV"
+                sheet_options.append(name)
+                df_dict[name] = df
+            else:
+                xls = pd.ExcelFile(file)
+                for sheet in xls.sheet_names:
+                    df = pd.read_excel(xls, sheet_name=sheet, header=None)
+                    name = f"[{file.name}] {sheet}"
+                    sheet_options.append(name)
+                    df_dict[name] = df
+                    
+    # 自動預選最可能的工作表
+    default_master_idx = 0
+    default_data_idx = 0
+    for i, name in enumerate(sheet_options):
+        if 'MASTER' in name.upper() or 'PROGRAM' in name.upper():
+            default_master_idx = i
+        if 'DATA' in name.upper():
+            default_data_idx = i
 
-    # 顯示下拉選單讓使用者確認抓取的 Sheet
-    col_sel1, col_sel2 = st.columns(2)
-    with col_sel1:
-        selected_sheet_main = st.selectbox("📄 請選擇【主資料表】的工作表：", sheet_names_main, index=default_idx_main)
-    with col_sel2:
-        selected_sheet_cat = st.selectbox("📄 請選擇【CATEGORY對照表】的工作表：", sheet_names_cat, index=default_idx_cat)
+    col1, col2 = st.columns(2)
+    with col1:
+        selected_master = st.selectbox("📄 1. 請選擇【卡片主資料表 (Master Sheet)】：", sheet_options, index=default_master_idx)
+    with col2:
+        data_options = ["(不使用對照表)"] + sheet_options
+        selected_data = st.selectbox("📄 2. 請選擇【CATEGORY 對照表 (尋找 Subclass Name)】：", data_options, index=default_data_idx + 1 if sheet_options else 0)
 
-    # 執行按鈕
     if st.button("生成 Program Items", type="primary"):
-        with st.spinner("資料比對與處理中，請稍候..."):
+        with st.spinner("解析卡片與資料比對中，請稍候..."):
             try:
                 # ---------------------------------------------------------
-                # 步驟 A: 讀取 CATEGORY 對照表並建立 VLOOKUP 字典
+                # 步驟 A: 建立 CATEGORY 對照字典 (DPCI -> Subclass Name)
                 # ---------------------------------------------------------
-                if file_cat.name.endswith('.csv'):
-                    df_cat_raw = pd.read_csv(file_cat, header=None)
-                else:
-                    df_cat_raw = pd.read_excel(xls_cat, sheet_name=selected_sheet_cat, header=None)
-                    
-                # 找 CATEGORY 表的表頭 (往下掃 20 列找 DPCI)
-                cat_header_idx = -1
-                for i in range(min(20, len(df_cat_raw))):
-                    if any('DPCI' in str(v).strip().upper() for v in df_cat_raw.iloc[i].values):
-                        cat_header_idx = i
-                        break
+                cat_mapping = {}
+                if selected_data != "(不使用對照表)":
+                    df_data = df_dict[selected_data]
+                    header_idx = -1
+                    for i in range(min(20, len(df_data))):
+                        if any('DPCI' in str(v).strip().upper() for v in df_data.iloc[i].values):
+                            header_idx = i
+                            break
+                            
+                    if header_idx != -1:
+                        df_data.columns = df_data.iloc[header_idx]
+                        df_data = df_data.iloc[header_idx + 1:].reset_index(drop=True)
                         
-                if cat_header_idx != -1:
-                    df_cat_raw.columns = df_cat_raw.iloc[cat_header_idx]
-                    df_cat_raw = df_cat_raw.iloc[cat_header_idx + 1:].reset_index(drop=True)
-                else:
-                    st.error("❌ 錯誤：在 CATEGORY 對照表中找不到 'DPCI' 欄位，無法進行比對。")
-                    st.stop()
-
-                # 建立欄位名稱正規化函數 (去空白、去換行、轉大寫)
-                def normalize_col(col_name):
-                    return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
-
-                cat_cols_map = {normalize_col(c): c for c in df_cat_raw.columns}
-                
-                # 找出 DPCI 與 CATEGORY 的實際欄位名稱
-                dpci_col_cat = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
-                cat_col_target = None
-                
-                # 模糊搜尋包含 CATEGORY 字眼的欄位 (例如 "AK Costumes Category" 也會中)
-                for norm_c, orig_c in cat_cols_map.items():
-                    if 'CATEGORY' in norm_c:
-                        cat_col_target = orig_c
-                        break
-                
-                # 建立 DPCI -> CATEGORY 的映射字典
-                category_mapping = {}
-                if dpci_col_cat and cat_col_target:
-                    # 清理 DPCI 格式 (去除 - 與空白) 以確保能 100% Match
-                    clean_cat_dpci = df_cat_raw[dpci_col_cat].astype(str).str.replace("-", "").str.strip()
-                    category_mapping = dict(zip(clean_cat_dpci, df_cat_raw[cat_col_target]))
-                else:
-                    st.warning("⚠️ 警告：在 CATEGORY 對照表中找不到包含 'CATEGORY' 字眼的欄位。")
+                        def normalize_col(col_name):
+                            return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
+                            
+                        cat_cols_map = {normalize_col(c): c for c in df_data.columns}
+                        
+                        dpci_col = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
+                        subclass_col = cat_cols_map.get("SUBCLASSNAME")
+                        
+                        if dpci_col and subclass_col:
+                            # 清理 DPCI 格式確保 100% 吻合
+                            clean_dpci = df_data[dpci_col].astype(str).str.replace("-", "").str.strip()
+                            clean_dpci = clean_dpci.apply(lambda x: x[:-2] if x.endswith('.0') else x)
+                            cat_mapping = dict(zip(clean_dpci, df_data[subclass_col]))
+                        else:
+                            st.warning("⚠️ 警告：在對照表中找不到 'DPCI' 或 'Subclass Name' 欄位。")
 
                 # ---------------------------------------------------------
-                # 步驟 B: 讀取主資料表並抓取內容
+                # 步驟 B: 解析 Master Sheet 卡片資料
                 # ---------------------------------------------------------
-                df_raw = pd.read_excel(xls_main, sheet_name=selected_sheet_main, header=None)
+                df_master = df_dict[selected_master]
+                parsed_items = []
                 
-                header_idx = -1
-                for i in range(min(20, len(df_raw))):
-                    if any('DPCI' in str(val).strip().upper() for val in df_raw.iloc[i].values):
-                        header_idx = i
-                        break
-                
-                if header_idx != -1:
-                    df_raw.columns = df_raw.iloc[header_idx]
-                    df_raw = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
-                else:
-                    st.error(f"❌ 錯誤：在主資料表『{selected_sheet_main}』中找不到 'DPCI' 欄位。")
-                    st.stop()
+                # 掃描整張表，尋找卡片的起點 "DPCI:"
+                for r in range(len(df_master)):
+                    for c in range(len(df_master.columns)):
+                        val = str(df_master.iloc[r, c]).strip().upper()
+                        if val == 'DPCI:':
+                            # 1. 抓取 DPCI
+                            dpci = clean_val(df_master.iloc[r, c+1] if c+1 < len(df_master.columns) else "")
+                            
+                            # 2. 往下掃描找 Description:
+                            desc = ""
+                            for i in range(15):
+                                if r+i >= len(df_master): break
+                                if str(df_master.iloc[r+i, c]).strip().upper() == 'DESCRIPTION:':
+                                    desc = clean_val(df_master.iloc[r+i, c+1] if c+1 < len(df_master.columns) else "")
+                                    break
+                                    
+                            # 3. 往下掃描找 QTY: (QTY 可能在同行稍微右邊的欄位)
+                            qty = ""
+                            for i in range(15):
+                                if r+i >= len(df_master): break
+                                found_qty = False
+                                for j in range(c, min(c+6, len(df_master.columns))):
+                                    if str(df_master.iloc[r+i, j]).strip().upper() == 'QTY:':
+                                        qty = clean_val(df_master.iloc[r+i, j+1] if j+1 < len(df_master.columns) else "")
+                                        found_qty = True
+                                        break
+                                if found_qty: break
+                                
+                            # 4. 往下掃描找 Factory (並切分 Name 與 ID)
+                            factory_name = ""
+                            factory_id = ""
+                            for i in range(15):
+                                if r+i >= len(df_master): break
+                                cell_val = str(df_master.iloc[r+i, c]).strip()
+                                if cell_val.upper().startswith('FACTORY:') or cell_val.upper().startswith('"FACTORY:'):
+                                    factory_str = cell_val.replace('"', '')
+                                    if ':' in factory_str:
+                                        factory_str = factory_str.split(':', 1)[1].strip()
+                                    
+                                    # 利用斜線拆分資料段落
+                                    parts = factory_str.split('/')
+                                    if len(parts) >= 1:
+                                        factory_name = parts[0].strip()
+                                    if len(parts) >= 2:
+                                        factory_id = clean_val(parts[1])
+                                    break
+                                    
+                            # 將解析出來的單個產品寫入清單
+                            parsed_items.append({
+                                'DPCI': dpci,
+                                'ITEM_DESC': desc,
+                                'PHOTO': '', # 保留圖片空白欄位
+                                'Factory Name': factory_name,
+                                'Factory ID': factory_id,
+                                'QTY': qty
+                            })
 
-                raw_columns_map = {normalize_col(c): c for c in df_raw.columns}
+                df_out = pd.DataFrame(parsed_items)
 
-                # 指定的 22 個欄位
+                # ---------------------------------------------------------
+                # 步驟 C: 重組 22 項最終欄位並匯出
+                # ---------------------------------------------------------
                 target_columns = [
                     "DPCI", "CATEGORY", "ITEM_DESC", "PHOTO", "FRP Level", 
                     "Red Seal(Y/N)", "CF item( Y/N )", "Tollgate Exempt", 
@@ -136,50 +176,30 @@ if file_main and file_cat:
                     "TOP Result", "FRI plan", "Port of Export", 
                     "1st Ship window", "Inspection Office"
                 ]
-                
-                df_main = pd.DataFrame()
-                
-                # 將資料寫入主表
-                for col in target_columns:
-                    norm_target = normalize_col(col)
-                    
-                    if norm_target == "DPCI":
-                        if "DPCI" in raw_columns_map:
-                            df_main[col] = df_raw[raw_columns_map["DPCI"]]
-                        elif "DPCI#" in raw_columns_map:
-                            df_main[col] = df_raw[raw_columns_map["DPCI#"]]
-                        else:
-                            df_main[col] = ""
-                    
-                    # 【特殊邏輯】：CATEGORY 欄位改為跨表 VLOOKUP 抓取
-                    elif norm_target == "CATEGORY":
-                        if "DPCI" in df_main.columns and category_mapping:
-                            clean_main_dpci = df_main["DPCI"].astype(str).str.replace("-", "").str.strip()
-                            df_main[col] = clean_main_dpci.map(category_mapping).fillna("")
-                        else:
-                            df_main[col] = ""
 
-                    # 其他欄位維持原邏輯在主表中抓取
-                    elif norm_target in raw_columns_map:
-                        df_main[col] = df_raw[raw_columns_map[norm_target]]
-                    elif norm_target == normalize_col("ITEM_DESC") and normalize_col("Product Description") in raw_columns_map:
-                        df_main[col] = df_raw[raw_columns_map[normalize_col("Product Description")]]
-                    elif norm_target == normalize_col("Factory ID") and normalize_col("Import Vendor ID") in raw_columns_map:
-                        df_main[col] = df_raw[raw_columns_map[normalize_col("Import Vendor ID")]]
-                    elif norm_target == normalize_col("Factory Name") and normalize_col("Import Vendor Name") in raw_columns_map:
-                        df_main[col] = df_raw[raw_columns_map[normalize_col("Import Vendor Name")]]
+                if not df_out.empty:
+                    # 進行 Subclass Name 替換 CATEGORY 的 VLOOKUP
+                    if cat_mapping:
+                        clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
+                        df_out['CATEGORY'] = clean_main_dpci.map(cat_mapping).fillna('')
                     else:
-                        df_main[col] = ""
-                
-                if "DPCI" in df_main.columns:
-                    df_main = df_main.dropna(subset=['DPCI'], how='all')
+                        df_out['CATEGORY'] = ""
 
-                # ---------------------------------------------------------
-                # 步驟 C: 匯出 Excel (維持全表 Arial、標題黃底粗體)
-                # ---------------------------------------------------------
+                    # 補齊其他指定空欄位
+                    for col in target_columns:
+                        if col not in df_out.columns:
+                            df_out[col] = ""
+                    
+                    df_out = df_out[target_columns] # 依照指定的 22 欄位排序
+
+                else:
+                    st.warning("⚠️ 在 Master Sheet 中未偵測到任何含有 'DPCI:' 的卡片。")
+                    st.stop()
+
+                # 格式設定 (Arial, 粗體黃底)
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_main.to_excel(writer, index=False, sheet_name='Program Items')
+                    df_out.to_excel(writer, index=False, sheet_name='Program Items')
                     
                     workbook = writer.book
                     worksheet = writer.sheets['Program Items']
@@ -193,13 +213,14 @@ if file_main and file_cat:
                         'font_name': 'Arial'
                     }) 
                     
-                    for col_num, value in enumerate(df_main.columns.values):
+                    for col_num, value in enumerate(df_out.columns.values):
                         worksheet.write(0, col_num, value, header_format)
                         worksheet.set_column(col_num, col_num, 15, cell_format)
 
                 processed_data = output.getvalue()
                 
-                st.success("✅ 處理完成！已成功合併並跨檔抓取 CATEGORY 資料。")
+                st.success("✅ 處理完成！已成功從卡片式排版中精準萃取所需資料。")
+                st.info("💡 提示：Excel 內的產品圖片因屬浮動物件，程式已為您預留 PHOTO 空白欄位，供您後續快速貼上圖片。")
                 
                 st.download_button(
                     label="📥 下載 Program Items.xlsx",
@@ -212,4 +233,4 @@ if file_main and file_cat:
                 st.error(f"❌ 處理檔案時發生錯誤: {e}")
 
 else:
-    st.info("💡 提示：請先在上方上傳「主資料表」與「CATEGORY對照表」，系統才會顯示生成按鈕。")
+    st.info("💡 提示：請在上方上傳相關的 Excel/CSV 檔案，您可以一次把多個檔案全選並拖曳進來！")
