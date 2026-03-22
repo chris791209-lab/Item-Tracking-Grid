@@ -317,8 +317,8 @@ if uploaded_files:
                                     else:
                                         worksheet.write(excel_row, c, df_out.iloc[i][col_name], fmt)
                                         
-                            # 單獨處理 Factory Name 與 ID 垂直合併 (改用細框，避免套用表格時跑版)
-                            fmt_fact = get_fmt(t=1, b=1, l=1, r=1, align='center')
+                            # 【修正點】：恢復合併儲存格的上下粗邊框 (t=2, b=2)，以對齊相鄰欄位的群組粗外框
+                            fmt_fact = get_fmt(t=2, b=2, l=1, r=1, align='center')
                             if s_idx == e_idx:
                                 worksheet.write(s_idx + excel_row_offset, 9, f_name, fmt_fact)
                                 worksheet.write(s_idx + excel_row_offset, 10, f_id, fmt_fact)
