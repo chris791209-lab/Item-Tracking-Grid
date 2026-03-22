@@ -1,14 +1,13 @@
 import streamlit as st
 import pandas as pd
 import io
-import re
 
 # ==========================================
 # 1. 頁面基本設定與標題
 # ==========================================
-st.set_page_config(page_title="Halloween Item Tracking Grid Generator", layout="wide")
-st.title("🎃 萬聖節專案 Tracking Grid 自動生成工具")
-st.markdown("請上傳 Program Sheet，系統將自動為您萃取資料並生成包含各子分頁的 Tracking Grid。")
+st.set_page_config(page_title="Program Items Generator", layout="wide")
+st.title("🎃 萬聖節專案 Program Items 自動生成工具")
+st.markdown("請上傳 Program Sheet，系統將自動萃取資料並生成標準格式的 Program Items 表單。")
 
 # ==========================================
 # 2. 建立檔案上傳區塊
@@ -20,100 +19,101 @@ st.divider()
 # ==========================================
 # 3. 核心處理邏輯
 # ==========================================
-if st.button("生成 Tracking Grid", type="primary"):
+if st.button("生成 Program Items", type="primary"):
     
     if file_program: 
         with st.spinner("資料處理中，請稍候..."):
             try:
-                # --- 步驟 A: 智慧讀取 Program Sheet (解決表頭偏移問題) ---
-                # 先讀取前 10 行來尋找真正的表頭 (尋找包含 DPCI 的那一列)
-                df_preview = pd.read_excel(file_program, nrows=10)
-                header_idx = 0
+                # --- 步驟 A: 讀取檔案並尋找真實表頭 ---
+                # 讀取全部資料，不預設表頭
+                df_raw = pd.read_excel(file_program, header=None)
                 
-                if 'DPCI' not in df_preview.columns:
-                    for i in range(len(df_preview)):
-                        # 將該列的值轉為字串清單進行比對
-                        row_values = [str(val).strip() for val in df_preview.iloc[i].values]
-                        if 'DPCI' in row_values:
-                            header_idx = i + 1 # 找到真正的表頭列索引
-                            break
+                header_idx = -1
+                # 掃描前 20 列，找出包含 'DPCI' 的那一列當作真實表頭
+                for i in range(min(20, len(df_raw))):
+                    row_values = [str(val).strip().upper() for val in df_raw.iloc[i].values]
+                    if 'DPCI' in row_values:
+                        header_idx = i
+                        break
                 
-                # 將檔案指標歸零，並使用正確的 header_idx 重新讀取完整資料
-                file_program.seek(0)
-                df_raw = pd.read_excel(file_program, header=header_idx)
-                
-                # --- 步驟 B: 清理欄位名稱 (解決 Alt+Enter 換行與多餘空白問題) ---
-                # 將欄位名稱的換行符號 \n 換成空格，並去除前後空白
-                df_raw.columns = df_raw.columns.astype(str).str.replace(r'\n', ' ', regex=True)
-                df_raw.columns = df_raw.columns.str.replace(r'\s+', ' ', regex=True).str.strip()
+                if header_idx != -1:
+                    # 將找到的那一列設為表頭，並剔除上方的無用資訊
+                    df_raw.columns = df_raw.iloc[header_idx]
+                    df_raw = df_raw.iloc[header_idx + 1:].reset_index(drop=True)
+                else:
+                    st.warning("⚠️ 警告：在檔案前 20 列中找不到 'DPCI' 欄位，可能會導致抓取失敗。")
 
-                # --- 步驟 C: 建立主表 (26C5 HWLN ITEMS) ---
-                # 包含您指定的重點欄位與追蹤欄位
-                final_main_cols = [
-                    'DPCI', 'CATEGORY', 'ITEM_DESC', 'PHOTO', 'FRP Level', 
-                    'Factory Name', 'Factory ID', 'Total SKU per Factory', 'QTY',
-                    'Tollgate Exempt', 'TPR Lite/Exempt', 'Tollgate Date', 'TPR Date', 'Result'
+                # --- 步驟 B: 建立終極欄位比對字典 ---
+                # 這個函數會把欄位名稱的空白、換行符號全部清空，並轉大寫 (例如 "Total SKU \nper Factory" -> "TOTALSKUPERFACTORY")
+                def normalize_col(col_name):
+                    return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
+
+                # 建立一個字典，對應「乾淨的欄位名」與「原始檔案中的欄位名」
+                raw_columns_map = {normalize_col(c): c for c in df_raw.columns}
+
+                # --- 步驟 C: 指定的 25 個完整欄位 ---
+                target_columns = [
+                    "DPCI", "CATEGORY", "ITEM_DESC", "PHOTO", "FRP Level", 
+                    "Red Seal(Y/N)", "CF item( Y/N )", "Tollgate Exempt", 
+                    "TPR Lite/Exempt", "Factory Name", "Factory ID", 
+                    "Total SKU per Factory", "QTY", "Self PPT(Y /N)", 
+                    "PPT completed( Y/Or ETA )", "Self BAH( Date )", 
+                    "Tollgate Date", "TPR Date", "Dupro Date", "Result", 
+                    "TOP Result", "FRI plan", "Port of Export", 
+                    "1st Ship window", "Inspection Office"
                 ]
                 
                 df_main = pd.DataFrame()
                 
-                # 欄位精準 Mapping
-                for col in final_main_cols:
-                    if col in df_raw.columns:
-                        df_main[col] = df_raw[col]
-                    # 容錯：處理常見的不同命名方式
-                    elif col == 'ITEM_DESC' and 'Product Description' in df_raw.columns:
-                        df_main[col] = df_raw['Product Description']
-                    elif col == 'Factory ID' and 'Import Vendor ID' in df_raw.columns:
-                        df_main[col] = df_raw['Import Vendor ID']
-                    elif col == 'Factory Name' and 'Import Vendor Name' in df_raw.columns:
-                        df_main[col] = df_raw['Import Vendor Name']
-                    else:
-                        df_main[col] = "" # 若來源檔案真的沒有此欄位，則留空維持版面
-                        
-                df_hwln_items = df_main
-                
-                # --- 步驟 D: 建立工廠清單 (Factory list) ---
-                if 'Factory ID' in df_hwln_items.columns:
-                    df_project_factories = df_hwln_items[['Factory ID', 'Factory Name']].drop_duplicates().dropna(subset=['Factory ID'])
-                    df_project_factories.rename(columns={'Factory ID': 'Facility ID'}, inplace=True)
-                else:
-                    df_project_factories = pd.DataFrame(columns=['Facility ID', 'Factory Name'])
+                # --- 步驟 D: 抓取資料寫入主表 ---
+                for col in target_columns:
+                    norm_target = normalize_col(col)
                     
-                factory_template_cols = ['Year', 'Total Skus', 'Costume Skus', 'FA Audit Date', 'FA Score & Grade', 'FA Expired Date', 'Remark']
-                for col in factory_template_cols:
-                    df_project_factories[col] = ""
+                    # 1. 直接精準比對 (無視空白與換行)
+                    if norm_target in raw_columns_map:
+                        original_col_name = raw_columns_map[norm_target]
+                        df_main[col] = df_raw[original_col_name]
+                        
+                    # 2. 容錯機制 (處理系統常見的替代命名)
+                    elif norm_target == normalize_col("ITEM_DESC") and normalize_col("Product Description") in raw_columns_map:
+                        df_main[col] = df_raw[raw_columns_map[normalize_col("Product Description")]]
+                    elif norm_target == normalize_col("Factory ID") and normalize_col("Import Vendor ID") in raw_columns_map:
+                        df_main[col] = df_raw[raw_columns_map[normalize_col("Import Vendor ID")]]
+                    elif norm_target == normalize_col("Factory Name") and normalize_col("Import Vendor Name") in raw_columns_map:
+                        df_main[col] = df_raw[raw_columns_map[normalize_col("Import Vendor Name")]]
+                    
+                    # 3. 如果真的找不到，就給空白欄位
+                    else:
+                        df_main[col] = ""
                 
-                cols_order = ['Year', 'Factory Name', 'Facility ID', 'Total Skus', 'Costume Skus', 'FA Audit Date', 'FA Score & Grade', 'FA Expired Date', 'Remark']
-                df_project_factories = df_project_factories[[c for c in cols_order if c in df_project_factories.columns]]
+                # 去除完全空白的無效列 (例如 Excel 底部的空白列)
+                if "DPCI" in df_main.columns:
+                    df_main = df_main.dropna(subset=['DPCI'], how='all')
 
-                # --- 步驟 E: 建立豁免清單 (Exemption request) ---
-                df_exemption = df_hwln_items.copy()
-                df_exemption['Justification'] = "" 
-                df_exemption['Item Status (New/CF)'] = "CF"
-                
-                # --- 步驟 F: 匯出多活頁簿 Excel ---
+                # --- 步驟 E: 匯出單一 Tab 的 Excel ---
                 output = io.BytesIO()
                 with pd.ExcelWriter(output, engine='xlsxwriter') as writer:
-                    df_hwln_items.to_excel(writer, index=False, sheet_name='26C5 HWLN ITEMS')
-                    df_exemption.to_excel(writer, index=False, sheet_name='Exemption request')
-                    df_project_factories.to_excel(writer, index=False, sheet_name='Factory list')
+                    # 只輸出單一 Tab 名為 Program Items
+                    df_main.to_excel(writer, index=False, sheet_name='Program Items')
                     
+                    # 簡單格式化：黃底粗體表頭，並自動調整第一列高度
                     workbook = writer.book
-                    worksheet = writer.sheets['26C5 HWLN ITEMS']
-                    header_format = workbook.add_format({'bold': True, 'bg_color': '#FFD966'}) 
+                    worksheet = writer.sheets['Program Items']
+                    header_format = workbook.add_format({'bold': True, 'bg_color': '#FFD966', 'border': 1}) 
                     
-                    for col_num, value in enumerate(df_hwln_items.columns.values):
+                    for col_num, value in enumerate(df_main.columns.values):
                         worksheet.write(0, col_num, value, header_format)
+                        # 稍微調整欄寬讓畫面好看一點
+                        worksheet.set_column(col_num, col_num, 15)
 
                 processed_data = output.getvalue()
                 
-                st.success("✅ Tracking Grid 處理完成！資料已成功抓取。")
+                st.success("✅ Program Items 處理完成！25個欄位已成功抓取並對齊。")
                 
                 st.download_button(
-                    label="📥 下載 Halloween Item Tracking Grid.xlsx",
+                    label="📥 下載 Program Items.xlsx",
                     data=processed_data,
-                    file_name="Automated_Halloween_Tracking_Grid.xlsx",
+                    file_name="Automated_Program_Items.xlsx",
                     mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet"
                 )
                 
