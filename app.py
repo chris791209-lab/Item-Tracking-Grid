@@ -42,7 +42,7 @@ if not check_password():
 # 1. 主程式標題 
 # ==========================================
 st.title("🎃 D240 Item Tracking Grid自動生成工具")
-st.markdown("請上傳專案檔案。系統將**自動解析所有上傳的 Program Sheet**，並從 **Data 表** 補齊缺失的資訊，一鍵產出完整總表。")
+st.markdown("請上傳專案檔案。系統將自動解析所有 Program Sheet，並強制執行**無邊界圖片配對**，最後從 Data 表補齊缺失的資訊。")
 
 # ==========================================
 # 2. 檔案上傳與選項
@@ -54,7 +54,7 @@ uploaded_files = st.file_uploader("📁 請將 [所有的 Program Sheet] 與 [Da
 
 st.markdown("### 🖼️ 步驟 2：選擇圖片來源")
 img_option = st.radio("請選擇您的圖片提供方式：", [
-    "1. 🗂️ 從 Program Sheet 卡片自動萃取 (包含智慧偏移校正與鎖定)",
+    "1. 🗂️ 從 Program Sheet 卡片自動萃取 (包含無邊界距離強制鎖定)",
     "2. 📁 上傳 ZIP 壓縮檔 (檔名需對應 DPCI)"
 ])
 
@@ -71,7 +71,6 @@ def clean_string(val):
 # 3. 核心處理邏輯
 # ==========================================
 if uploaded_files:
-    # 支援多份 Program Sheet 同時解析
     master_files = []
     data_files = []
     
@@ -80,17 +79,14 @@ if uploaded_files:
         if "TRACKING" in fname or "GRID" in fname or "AUTOMATED" in fname:
             continue
         
-        # 精準分類檔案
         if "DATA" in fname or "WRK" in fname:
             data_files.append(file)
         elif "PROGRAM" in fname or "MASTER" in fname or "SHEET" in fname or "PS" in fname:
             master_files.append(file)
         else:
-            # 盲猜防呆
             if file.name.endswith('.csv'): data_files.append(file)
             else: master_files.append(file)
 
-    # 去重複
     master_files = list(set(master_files))
     data_files = list(set(data_files))
 
@@ -99,7 +95,7 @@ if uploaded_files:
             st.error("❌ 找不到 Program Sheet！請確認檔案是否正確上傳。")
             st.stop()
             
-        with st.spinner("多檔聯合解析中，萃取圖片與 VLOOKUP 可能需要一分鐘，請稍候..."):
+        with st.spinner("多檔聯合解析中，執行全域圖片比對可能需要一分鐘，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
                     if img_option.startswith("2") and uploaded_zip:
@@ -108,7 +104,7 @@ if uploaded_files:
                             zip_ref.extractall(temp_dir)
 
                     # ---------------------------------------------------------
-                    # 步驟 A: 建立 Data 表字典 (支援多份 Data 聯集)
+                    # 步驟 A: 建立 Data 表字典
                     # ---------------------------------------------------------
                     cat_mapping = {}
                     fact_mapping = {}
@@ -151,7 +147,7 @@ if uploaded_files:
                                 if qty_col: qty_mapping.update(dict(zip(clean_dpci, df_data[qty_col])))
 
                     # ---------------------------------------------------------
-                    # 步驟 B: 解析所有 Program Sheet 卡片 (多檔迴圈)
+                    # 步驟 B: 解析所有 Program Sheet 卡片
                     # ---------------------------------------------------------
                     parsed_items = []
                     
@@ -169,11 +165,16 @@ if uploaded_files:
                         sheet = wb[m_sheet]
                         
                         image_loader = None
-                        used_images = set() # 該檔案已鎖定的圖片
+                        used_images = set() 
                         
                         if img_option.startswith("1"):
-                            try: image_loader = SheetImageLoader(sheet)
-                            except: pass
+                            try: 
+                                image_loader = SheetImageLoader(sheet)
+                                # 【新增回報】：顯示系統到底「看」到了幾張圖片
+                                total_imgs = len(image_loader._images)
+                                st.info(f"📊 檔案 [{m_file.name}] 系統底層偵測到 {total_imgs} 張圖片。")
+                            except Exception as e: 
+                                st.warning(f"⚠️ 無法讀取 [{m_file.name}] 的圖片格式: {e}")
                         
                         for r in range(1, sheet.max_row + 1):
                             for c in range(1, sheet.max_column + 1):
@@ -183,7 +184,6 @@ if uploaded_files:
                                 val_clean = clean_string(cell_val)
                                 
                                 if val_clean == 'DPCI':
-                                    # 容錯抓取 DPCI (避免合併儲存格吃掉欄位)
                                     dpci = ""
                                     for offset in range(1, 5):
                                         v = str(sheet.cell(row=r, column=c+offset).value).strip()
@@ -192,14 +192,16 @@ if uploaded_files:
                                     
                                     if not dpci: continue
                                     
-                                    # --- 超廣角圖片雷達與距離鎖定 ---
+                                    # ==========================================
+                                    # 🖼️ 無邊界圖片鎖定邏輯
+                                    # ==========================================
                                     img_obj = None
                                     if img_option.startswith("1") and image_loader:
                                         found_img_cell = None
                                         
-                                        # 第一層：大範圍雷達
-                                        for row_offset in range(-8, 25):
-                                            for col_offset in range(-6, 15):
+                                        # 第一層：大範圍雷達掃描
+                                        for row_offset in range(-15, 30):
+                                            for col_offset in range(-10, 20):
                                                 c_idx = max(1, c + col_offset)
                                                 r_idx = max(1, r - row_offset)
                                                 img_cell = f"{get_column_letter(c_idx)}{r_idx}"
@@ -216,9 +218,9 @@ if uploaded_files:
                                                 used_images.add(found_img_cell)
                                             except: pass
                                         else:
-                                            # 第二層：全域距離計算 (找最近且未使用的圖片)
+                                            # 第二層：無邊界強制配對 (找出整張表距離最近且未使用的圖片)
                                             try:
-                                                min_dist = 9999
+                                                min_dist = 999999
                                                 closest_cell = None
                                                 for img_c in image_loader._images.keys():
                                                     if img_c in used_images: continue
@@ -226,16 +228,12 @@ if uploaded_files:
                                                     col_str, row_num = coordinate_from_string(img_c)
                                                     img_col_idx = column_index_from_string(col_str)
                                                     
-                                                    row_diff = r - row_num
-                                                    col_diff = abs(c - img_col_idx)
-                                                    
-                                                    # 極端偏移容許值
-                                                    if -15 <= row_diff <= 60 and col_diff <= 25:
-                                                        dist = abs(row_diff) + (col_diff * 2)
-                                                        if dist < min_dist:
-                                                            min_dist = dist
-                                                            closest_cell = img_c
-                                                            
+                                                    # 距離計算 (稍微加重水平偏移的懲罰)
+                                                    dist = abs(r - row_num) + (abs(c - img_col_idx) * 2)
+                                                    if dist < min_dist:
+                                                        min_dist = dist
+                                                        closest_cell = img_c
+                                                        
                                                 if closest_cell:
                                                     raw_img = image_loader.get(closest_cell)
                                                     img_obj = raw_img.copy() 
@@ -245,10 +243,13 @@ if uploaded_files:
                                         if img_obj:
                                             safe_name = "".join(x for x in dpci if x.isalnum() or x in "-_")
                                             if safe_name.endswith('.0'): safe_name = safe_name[:-2]
-                                            try: img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
+                                            try: 
+                                                # 如果原圖是 RGBA (去背圖)，轉換為 RGB 以避免儲存錯誤
+                                                if img_obj.mode in ("RGBA", "P"):
+                                                    img_obj = img_obj.convert("RGB")
+                                                img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
                                             except: pass
                                             
-                                    # 往下找 Description
                                     desc = ""
                                     for i in range(1, 20):
                                         if r+i > sheet.max_row: break
@@ -260,7 +261,6 @@ if uploaded_files:
                                                     desc = v; break
                                             break
                                                 
-                                    # 往下找 QTY
                                     qty = ""
                                     for i in range(1, 20):
                                         if r+i > sheet.max_row: break
@@ -277,7 +277,6 @@ if uploaded_files:
                                                 if found_qty: break
                                         if found_qty: break
                                         
-                                    # 往下找 Factory
                                     factory_name = ""
                                     factory_id = ""
                                     for i in range(1, 20):
@@ -285,7 +284,6 @@ if uploaded_files:
                                         f_val = clean_string(sheet.cell(row=r+i, column=c).value)
                                         if 'FACTORY' in f_val or 'VENDOR' in f_val:
                                             raw_fact = str(sheet.cell(row=r+i, column=c).value).strip().replace('"', '')
-                                            # 防呆：如果只有文字標題，實際值在旁邊
                                             if len(raw_fact) < 10 or raw_fact.endswith(':'):
                                                 for offset in range(1, 5):
                                                     v = str(sheet.cell(row=r+i, column=c+offset).value).strip()
@@ -313,7 +311,7 @@ if uploaded_files:
                     df_out = pd.DataFrame(parsed_items)
 
                     # ---------------------------------------------------------
-                    # 步驟 C: 終極 VLOOKUP 補齊資料
+                    # 步驟 C: VLOOKUP 補齊資料
                     # ---------------------------------------------------------
                     clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
                     
@@ -363,21 +361,18 @@ if uploaded_files:
                                 format_cache[key] = workbook.add_format(props)
                             return format_cache[key]
 
-                        # 1. L1 總數
                         fmt_total = workbook.add_format({'font_name': 'Arial', 'bold': True, 'font_color': '#800080', 'font_size': 12, 'align': 'center', 'valign': 'vcenter'})
                         worksheet.write(0, 11, len(df_out), fmt_total)
                         
-                        # 2. 標題列
                         fmt_header = workbook.add_format({'bold': True, 'bg_color': '#FFD966', 'border': 1, 'font_name': 'Arial', 'valign': 'vcenter', 'text_wrap': True}) 
                         for c, col_name in enumerate(target_columns):
                             worksheet.write(1, c, col_name, fmt_header)
                             worksheet.set_column(c, c, 15) 
                             
-                        worksheet.set_column(3, 3, 16) # PHOTO
-                        worksheet.set_column(9, 9, 25) # Factory Name
-                        worksheet.set_column(10, 10, 15) # Factory ID
+                        worksheet.set_column(3, 3, 16) 
+                        worksheet.set_column(9, 9, 25) 
+                        worksheet.set_column(10, 10, 15) 
                         
-                        # 3. 群組化
                         factories = df_out['Factory Name'].tolist()
                         groups = []
                         if factories:
@@ -388,7 +383,6 @@ if uploaded_files:
                                     start_idx = i
                             groups.append((start_idx, len(factories) - 1, factories[start_idx]))
 
-                        # 4. 寫入資料
                         excel_row_offset = 2 
                         for s_idx, e_idx, f_name in groups:
                             f_id = str(df_out.iloc[s_idx]['Factory ID']).strip()
@@ -420,7 +414,7 @@ if uploaded_files:
                                     
                                     fmt = get_fmt(t_border, b_border, l_border, r_border)
                                     
-                                    if c == 3: # PHOTO
+                                    if c == 3: 
                                         worksheet.write(excel_row, c, "", fmt)
                                         if img_path:
                                             try:
@@ -432,13 +426,12 @@ if uploaded_files:
                                                     img_insert_count += 1
                                             except: pass
                                             
-                                    elif c == 11: # Total SKU
+                                    elif c == 11: 
                                         if i == s_idx: worksheet.write(excel_row, c, e_idx - s_idx + 1, fmt)
                                         else: worksheet.write(excel_row, c, "", fmt)
                                     else:
                                         worksheet.write(excel_row, c, df_out.iloc[i][col_name], fmt)
                                         
-                            # 垂直合併與外框
                             fmt_fact = get_fmt(t=2, b=2, l=1, r=1, align='center')
                             if s_idx == e_idx:
                                 worksheet.write(s_idx + excel_row_offset, 9, f_name, fmt_fact)
@@ -462,4 +455,4 @@ if uploaded_files:
                     st.error(f"❌ 處理檔案時發生錯誤: {e}")
 
 else:
-    st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案 (不限順序)。")
+    st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案 (包含 Program Sheet 與 Data)。")
