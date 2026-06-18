@@ -39,7 +39,7 @@ if not check_password():
 # 1. 主程式標題 
 # ==========================================
 st.title("🎃 D240 Item Tracking Grid自動生成工具")
-st.markdown("請上傳您的專案檔案 (Program Sheet 或 Data 表)。系統會智慧解析內容，並透過 DPCI 完美匹配您上傳的圖片 ZIP 包！")
+st.markdown("請上傳您的專案檔案 (Program Sheet 或 Data 表)。系統會智慧解析內容、自動剔除重複資料，並透過 DPCI 完美匹配您上傳的圖片 ZIP 包！")
 
 # ==========================================
 # 2. 檔案上傳區塊
@@ -67,7 +67,7 @@ def add_white_background(img):
     if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
         img = img.convert('RGBA')
         bg = Image.new('RGB', img.size, (255, 255, 255))
-        bg.paste(img, mask=img.split()[3]) # 利用 Alpha 通道當遮罩，把商品貼到白底上
+        bg.paste(img, mask=img.split()[3]) 
         return bg
     elif img.mode != 'RGB':
         return img.convert('RGB')
@@ -269,18 +269,30 @@ if uploaded_files:
                                                     'QTY': qty
                                                 })
 
-                    # --- 3. 決策資料來源 ---
-                    if len(parsed_items) > 0:
-                        final_items = parsed_items
-                    else:
-                        unique_tabular = []
-                        seen_dpcis = set()
-                        for item in tabular_items:
-                            c_dpci = clean_dpci_for_map(item['DPCI'])
-                            if c_dpci not in seen_dpcis:
-                                seen_dpcis.add(c_dpci)
-                                unique_tabular.append(item)
-                        final_items = unique_tabular
+                    # --- 3. 決策資料來源與【智能去重 (Smart Deduplication)】 ---
+                    raw_final_items = parsed_items if len(parsed_items) > 0 else tabular_items
+                    
+                    unique_items_dict = {}
+                    for item in raw_final_items:
+                        dpci_key = clean_dpci_for_map(item.get('DPCI', ''))
+                        if not dpci_key: continue
+                        
+                        # 如果是第一次遇到這個 DPCI，直接存入字典
+                        if dpci_key not in unique_items_dict:
+                            unique_items_dict[dpci_key] = item
+                        else:
+                            # 🚨 【核心修復】：如果 DPCI 重複出現，則保留最完整的資料，絕對不產生第二行！
+                            existing = unique_items_dict[dpci_key]
+                            if not existing.get('Factory Name') and item.get('Factory Name'):
+                                existing['Factory Name'] = item['Factory Name']
+                            if not existing.get('Factory ID') and item.get('Factory ID'):
+                                existing['Factory ID'] = item['Factory ID']
+                            if not existing.get('QTY') and item.get('QTY'):
+                                existing['QTY'] = item['QTY']
+                            if not existing.get('ITEM_DESC') and item.get('ITEM_DESC'):
+                                existing['ITEM_DESC'] = item['ITEM_DESC']
+
+                    final_items = list(unique_items_dict.values())
 
                     if not final_items:
                         st.warning("⚠️ 無法在檔案中找到任何有效資料。請確認檔案格式！")
@@ -393,7 +405,6 @@ if uploaded_files:
                                         if img_path:
                                             try:
                                                 with Image.open(img_path) as img:
-                                                    # 👉 呼叫白底轉換函式，消除去背圖變黑的問題
                                                     img = add_white_background(img)
                                                     img.thumbnail((100, 100))
                                                     resized_path = os.path.join(temp_dir, f"resized_{i}.png")
@@ -418,7 +429,7 @@ if uploaded_files:
 
                     processed_data = output.getvalue()
                     
-                    st.success(f"✅ 處理完成！共解析出 **{len(df_out)}** 筆商品，並從 ZIP 檔中成功置入 **{img_insert_count}** 張完美白底圖片。")
+                    st.success(f"✅ 處理完成！已智能去重並解析出 **{len(df_out)}** 筆獨立商品，成功置入 **{img_insert_count}** 張完美白底圖片。")
                     
                     st.download_button(
                         label="📥 下載 Item Tracking Grid.xlsx",
@@ -428,7 +439,7 @@ if uploaded_files:
                     )
                     
                 except Exception as e:
-                    st.error(f"❌ 處理檔案時發生錯誤: {str(e)}")
+                    st.error(f"❌ 處理檔案時發生內部錯誤: {str(e)}")
 
 else:
     st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案與圖片 ZIP 檔。")
