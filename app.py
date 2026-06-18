@@ -7,13 +7,14 @@ import zipfile
 import openpyxl
 from openpyxl_image_loader import SheetImageLoader
 from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from PIL import Image
 
 # ==========================================
 # 1. 頁面基本設定與標題
 # ==========================================
 st.set_page_config(page_title="D240 Item Tracking Grid Generator", layout="wide")
-st.title("🎃 D240 Item Tracking Grid自動生成工具 ")
+st.title("🎃 D240 Item Tracking Grid自動生成工具")
 st.markdown("請上傳專案檔案。系統將以 **Program Sheet** 為主視覺抓取圖片與排版，並自動從 **Data 表** 補齊缺失的工廠或數量資訊。")
 
 # ==========================================
@@ -26,7 +27,7 @@ uploaded_files = st.file_uploader("📁 請將 [Program Sheet] 與 [Data 表] �
 
 st.markdown("### 🖼️ 步驟 2：選擇圖片來源")
 img_option = st.radio("請選擇您的圖片提供方式：", [
-    "1. 🗂️ 從 Program / Master Sheet 卡片自動萃取 (自動大範圍掃描圖片)",
+    "1. 🗂️ 從 Program / Master Sheet 卡片自動萃取 (包含大範圍智慧掃描)",
     "2. 📁 上傳 ZIP 壓縮檔 (檔名需對應 DPCI)"
 ])
 
@@ -125,7 +126,7 @@ if uploaded_files:
                                 if qty_col: qty_mapping = dict(zip(clean_dpci, df_data[qty_col]))
 
                     # ---------------------------------------------------------
-                    # 步驟 B: 解析 Program Sheet 卡片 (加入擴展掃描與容錯)
+                    # 步驟 B: 解析 Program Sheet 卡片
                     # ---------------------------------------------------------
                     parsed_items = []
                     
@@ -151,29 +152,56 @@ if uploaded_files:
                             val_clean = clean_string(cell_val)
                             
                             if val_clean == 'DPCI':
-                                # 抓取 DPCI (容許合併儲存格導致的偏移)
                                 dpci = str(sheet.cell(row=r, column=c+1).value).strip()
                                 if dpci.lower() == 'none' or dpci == "": 
                                     dpci = str(sheet.cell(row=r, column=c+2).value).strip()
                                 if dpci.lower() == 'none': dpci = ""
                                 if not dpci: continue
                                 
-                                # --- 圖片無死角掃描 ---
+                                # ==========================================
+                                # 🖼️ 全新雙層圖片搜尋邏輯 (適應各種錨點偏移)
+                                # ==========================================
+                                img_obj = None
                                 if img_option.startswith("1") and image_loader:
-                                    img_obj = None
-                                    # 擴大範圍：以 DPCI 為中心，往上 8 列，左右各 3 欄
-                                    for row_offset in range(-1, 8):
-                                        if r - row_offset < 1: continue
-                                        for col_offset in range(-2, 4):
+                                    found_img_cell = None
+                                    
+                                    # [第一層] 擴大雷達掃描：以 DPCI 為中心，往上掃 16 列，左右各掃 8 欄
+                                    for row_offset in range(-2, 17):
+                                        for col_offset in range(-4, 9):
                                             c_idx = max(1, c + col_offset)
-                                            img_cell = f"{get_column_letter(c_idx)}{r - row_offset}"
+                                            r_idx = max(1, r - row_offset)
+                                            img_cell = f"{get_column_letter(c_idx)}{r_idx}"
                                             if image_loader.image_in(img_cell):
-                                                try:
-                                                    img_obj = image_loader.get(img_cell)
-                                                    break
-                                                except: pass
-                                        if img_obj: break
+                                                found_img_cell = img_cell
+                                                break
+                                        if found_img_cell: break
                                         
+                                    if found_img_cell:
+                                        img_obj = image_loader.get(found_img_cell)
+                                    else:
+                                        # [第二層] 智慧距離計算：搜尋整張表所有圖片，找出位於此卡片上方且距離最近的圖片
+                                        try:
+                                            min_dist = 9999
+                                            closest_cell = None
+                                            for img_c in image_loader._images.keys():
+                                                col_str, row_num = coordinate_from_string(img_c)
+                                                img_col_idx = column_index_from_string(col_str)
+                                                
+                                                row_diff = r - row_num
+                                                col_diff = abs(c - img_col_idx)
+                                                
+                                                # 圖片必須位於 DPCI 上方 (或同一列)，且不可離太遠
+                                                if 0 <= row_diff <= 30 and col_diff <= 12:
+                                                    dist = row_diff + col_diff
+                                                    if dist < min_dist:
+                                                        min_dist = dist
+                                                        closest_cell = img_c
+                                                        
+                                            if closest_cell:
+                                                img_obj = image_loader.get(closest_cell)
+                                        except: pass
+                                        
+                                    # 儲存找到的圖片
                                     if img_obj:
                                         safe_name = "".join(x for x in dpci if x.isalnum() or x in "-_")
                                         if safe_name.endswith('.0'): safe_name = safe_name[:-2]
