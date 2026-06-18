@@ -1,57 +1,4 @@
 import streamlit as st
-import streamlit as st
-
-def check_password():
-    """回傳 True 代表使用者輸入了正確的密碼"""
-
-    def password_entered():
-        """檢查使用者輸入的密碼是否與 Streamlit Secrets 中的密碼相符"""
-        if st.session_state["password"] == st.secrets["app_password"]:
-            st.session_state["password_correct"] = True
-            # 密碼正確後，刪除 session_state 中的密碼紀錄以策安全
-            del st.session_state["password"]  
-        else:
-            st.session_state["password_correct"] = False
-
-    if "password_correct" not in st.session_state:
-        # 第一次進入網頁，顯示密碼輸入框
-        st.text_input(
-            "🔒 請輸入 AE 部門共用密碼以啟用工具：", 
-            type="password", 
-            on_change=password_entered, 
-            key="password"
-        )
-        return False
-    
-    elif not st.session_state["password_correct"]:
-        # 密碼輸入錯誤，顯示錯誤訊息並重新要求輸入
-        st.text_input(
-            "🔒 請輸入 AE 部門共用密碼以啟用工具：", 
-            type="password", 
-            on_change=password_entered, 
-            key="password"
-        )
-        st.error("❌ 密碼錯誤，請重新輸入。")
-        return False
-    
-    else:
-        # 密碼正確
-        return True
-
-# ==========================================
-# 下方開始才是您原本的 App 邏輯
-# ==========================================
-
-# 利用 if 判斷式，只有密碼正確才會執行區塊內的程式碼
-if check_password():
-    st.success("成功登入！")
-    
-    # 請將您原本寫好的工具程式碼（例如 PO 單驗證、萬聖節專案的資料比對邏輯）
-    # 全部縮排 (Indent) 放入這個 if 區塊下方
-    
-    st.title("自動化資料處理工具")
-    st.write("這裡是內部工具介面，您可以開始上傳檔案了...")
-    # ... 您原本的程式碼 ...
 import pandas as pd
 import io
 import os
@@ -93,23 +40,40 @@ st.divider()
 # 3. 核心處理邏輯
 # ==========================================
 if uploaded_files:
-    # --- 自動分類檔案 ---
+    # --- 【升級版】自動分類檔案 (加入終極防呆機制) ---
     master_file = None
     data_file = None
     
     for file in uploaded_files:
-        name_upper = file.name.upper()
-        if "PROGRAM" in name_upper or "MASTER" in name_upper:
-            master_file = file
-        elif "DATA" in name_upper or "2026" in name_upper or "68" in name_upper:
-            data_file = file
-
-    if not master_file and len(uploaded_files) > 0: master_file = uploaded_files[0]
-    if not data_file and len(uploaded_files) > 1: data_file = uploaded_files[1]
+        file_name_upper = file.name.upper()
+        
+        # 防呆：直接排除先前產出的報表，避免系統自我讀取
+        if "TRACKING" in file_name_upper or "GRID" in file_name_upper or "AUTOMATED" in file_name_upper:
+            continue
+            
+        if file.name.endswith('.csv'):
+            if "DATA" in file_name_upper: data_file = file
+            continue
+            
+        try:
+            # 讀取 Excel 裡面的 Sheet 名稱來做最精準的判斷
+            xls_peek = pd.ExcelFile(io.BytesIO(file.getvalue()))
+            sheet_names_upper = [s.upper() for s in xls_peek.sheet_names]
+            
+            if any("MASTER" in s for s in sheet_names_upper) or any("PROGRAM" in s for s in sheet_names_upper):
+                master_file = file
+            if any("DATA" in s for s in sheet_names_upper):
+                data_file = file
+        except:
+            pass
 
     if st.button("✨ 智慧生成 Item Tracking Grid", type="primary"):
-        with st.spinner("解析資料與自動排版中，請稍候..."):
+        # 確保有抓到 Master Sheet
+        if not master_file:
+            st.error("❌ 錯誤：在您上傳的檔案中找不到包含 'Master Sheet' 或 'Program' 的有效來源檔！請確認是否漏傳，或是誤傳了產出檔。")
+            st.stop()
             
+        with st.spinner("解析資料與自動排版中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
                     # --- 處理 ZIP 圖片包 ---
@@ -154,7 +118,7 @@ if uploaded_files:
                                 cat_mapping = dict(zip(clean_dpci, df_data[subclass_col]))
 
                     # ---------------------------------------------------------
-                    # 步驟 B: 解析 Master Sheet 卡片資料
+                    # 步驟 B: 解析 Master Sheet 卡片資料 (加入無死角掃描)
                     # ---------------------------------------------------------
                     parsed_items = []
                     
@@ -174,10 +138,17 @@ if uploaded_files:
                     
                     for r in range(1, sheet.max_row + 1):
                         for c in range(1, sheet.max_column + 1):
-                            val = str(sheet.cell(row=r, column=c).value).strip().upper()
+                            cell_val = sheet.cell(row=r, column=c).value
+                            if cell_val is None: continue
                             
-                            if val == 'DPCI:':
+                            # 【升級版】去除所有空白再比對，避免被隱藏的空白字元干擾
+                            val = str(cell_val).replace(' ', '').upper()
+                            
+                            if 'DPCI:' in val:
+                                # 嘗試抓取 DPCI (加入容錯機制，預防合併儲存格導致 c+1 為空)
                                 dpci = str(sheet.cell(row=r, column=c+1).value).strip()
+                                if dpci.lower() == 'none' or dpci == "": 
+                                    dpci = str(sheet.cell(row=r, column=c+2).value).strip()
                                 if dpci.lower() == 'none': dpci = ""
                                 
                                 if img_option.startswith("1") and image_loader:
@@ -203,8 +174,11 @@ if uploaded_files:
                                 desc = ""
                                 for i in range(1, 15):
                                     if r+i <= sheet.max_row:
-                                        if str(sheet.cell(row=r+i, column=c).value).strip().upper() == 'DESCRIPTION:':
+                                        c_val = str(sheet.cell(row=r+i, column=c).value).replace(' ', '').upper()
+                                        if 'DESCRIPTION:' in c_val:
                                             desc = str(sheet.cell(row=r+i, column=c+1).value).strip()
+                                            if desc.lower() == 'none' or desc == "":
+                                                desc = str(sheet.cell(row=r+i, column=c+2).value).strip()
                                             if desc.lower() == 'none': desc = ""
                                             break
                                             
@@ -212,23 +186,25 @@ if uploaded_files:
                                 for i in range(1, 15):
                                     if r+i > sheet.max_row: break
                                     found_qty = False
-                                    for j in range(c, c+6):
-                                        if j <= sheet.max_column:
-                                            if str(sheet.cell(row=r+i, column=j).value).strip().upper() == 'QTY:':
-                                                qty = str(sheet.cell(row=r+i, column=j+1).value).strip()
-                                                if qty.lower() == 'none': qty = ""
-                                                if qty.endswith('.0'): qty = qty[:-2]
-                                                found_qty = True
-                                                break
+                                    for j in range(c, min(c+8, sheet.max_column + 1)):
+                                        q_val = str(sheet.cell(row=r+i, column=j).value).replace(' ', '').upper()
+                                        if 'QTY:' in q_val:
+                                            qty = str(sheet.cell(row=r+i, column=j+1).value).strip()
+                                            if qty.lower() == 'none' or qty == "":
+                                                qty = str(sheet.cell(row=r+i, column=j+2).value).strip()
+                                            if qty.lower() == 'none': qty = ""
+                                            if qty.endswith('.0'): qty = qty[:-2]
+                                            found_qty = True
+                                            break
                                     if found_qty: break
                                     
                                 factory_name = ""
                                 factory_id = ""
                                 for i in range(1, 15):
                                     if r+i > sheet.max_row: break
-                                    cell_val = str(sheet.cell(row=r+i, column=c).value).strip()
-                                    if cell_val.upper().startswith('FACTORY:') or cell_val.upper().startswith('"FACTORY:'):
-                                        factory_str = cell_val.replace('"', '')
+                                    f_val = str(sheet.cell(row=r+i, column=c).value).strip().upper()
+                                    if f_val.startswith('FACTORY:') or f_val.startswith('"FACTORY:'):
+                                        factory_str = str(sheet.cell(row=r+i, column=c).value).strip().replace('"', '')
                                         if ':' in factory_str:
                                             factory_str = factory_str.split(':', 1)[1].strip()
                                         parts = factory_str.split('/')
@@ -236,16 +212,17 @@ if uploaded_files:
                                         if len(parts) >= 2: factory_id = parts[1].strip()
                                         break
                                         
-                                parsed_items.append({
-                                    'DPCI': dpci,
-                                    'ITEM_DESC': desc,
-                                    'Factory Name': factory_name,
-                                    'Factory ID': factory_id,
-                                    'QTY': qty
-                                })
+                                if dpci: # 確保有成功抓到 DPCI 才寫入
+                                    parsed_items.append({
+                                        'DPCI': dpci,
+                                        'ITEM_DESC': desc,
+                                        'Factory Name': factory_name,
+                                        'Factory ID': factory_id,
+                                        'QTY': qty
+                                    })
 
                     if not parsed_items:
-                        st.warning("⚠️ 在 Master Sheet 中未偵測到任何含有 'DPCI:' 的卡片。")
+                        st.warning("⚠️ 在 Master Sheet 中未偵測到任何含有 'DPCI:' 的卡片。請確認您上傳的來源檔案是否正確。")
                         st.stop()
                     
                     df_out = pd.DataFrame(parsed_items)
@@ -275,7 +252,7 @@ if uploaded_files:
                         if col not in df_out.columns: df_out[col] = ""
 
                     # ---------------------------------------------------------
-                    # 步驟 D: XlsxWriter 進階排版 (合併儲存格、外框、頂部 L1 總數)
+                    # 步驟 D: XlsxWriter 進階排版
                     # ---------------------------------------------------------
                     output = io.BytesIO()
                     img_insert_count = 0
@@ -341,7 +318,7 @@ if uploaded_files:
                                     if img_path: break
                                 
                                 for c, col_name in enumerate(target_columns):
-                                    if c in [9, 10]: continue # 跳過 Factory Name 與 Factory ID 
+                                    if c in [9, 10]: continue 
                                     
                                     t_border = 2 if i == s_idx else 1
                                     b_border = 2 if i == e_idx else 1
@@ -370,7 +347,7 @@ if uploaded_files:
                                     else:
                                         worksheet.write(excel_row, c, df_out.iloc[i][col_name], fmt)
                                         
-                            # 【修正點】：恢復合併儲存格的上下粗邊框 (t=2, b=2)，以對齊相鄰欄位的群組粗外框
+                            # 【保留上版修正】：使用 t=2, b=2 讓 Factory Name/ID 儲存格的上下框線為粗線
                             fmt_fact = get_fmt(t=2, b=2, l=1, r=1, align='center')
                             if s_idx == e_idx:
                                 worksheet.write(s_idx + excel_row_offset, 9, f_name, fmt_fact)
