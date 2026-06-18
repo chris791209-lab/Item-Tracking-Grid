@@ -14,7 +14,7 @@ import re
 # 1. 頁面基本設定與標題
 # ==========================================
 st.set_page_config(page_title="D240 Item Tracking Grid Generator", layout="wide")
-st.title("🎃 D240 Item Tracking Grid自動生成工具 (Workspace 升級版)")
+st.title("🎃 D240 Item Tracking Grid自動生成工具 ")
 st.markdown("請上傳 **Workspace 匯出檔 (Products.csv/xlsx)** 與 **Data 表**。系統將精準解析表格並自動排版。")
 
 # ==========================================
