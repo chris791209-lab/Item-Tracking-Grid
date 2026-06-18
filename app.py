@@ -5,6 +5,9 @@ import os
 import tempfile
 import zipfile
 import openpyxl
+from openpyxl_image_loader import SheetImageLoader
+from openpyxl.utils import get_column_letter
+from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from PIL import Image
 
 # ==========================================
@@ -83,7 +86,7 @@ if uploaded_files:
 
     if st.button("✨ 智慧生成 Item Tracking Grid", type="primary"):
         if not master_files:
-            st.error("❌ 找不到 Program Sheet！請確認檔案是否正確上傳。")
+            st.error("❌ 找不到 Program Sheet！請確認您有上傳包含商品卡片的 Excel 檔案。")
             st.stop()
             
         with st.spinner("資料解析與圖片配對中，請稍候..."):
@@ -96,7 +99,7 @@ if uploaded_files:
                             zip_ref.extractall(temp_dir)
 
                     # ---------------------------------------------------------
-                    # 步驟 A: 建立 Data 表字典 (VLOOKUP 來源)
+                    # 步驟 A: 建立 Data 表字典 (強化系統 CSV 讀取能力)
                     # ---------------------------------------------------------
                     cat_mapping = {}
                     fact_mapping = {}
@@ -104,8 +107,14 @@ if uploaded_files:
                     
                     for d_file in data_files:
                         data_io = io.BytesIO(d_file.getvalue()) 
+                        
                         if d_file.name.endswith('.csv'):
-                            df_data = pd.read_csv(data_io, header=None)
+                            # 【修復 1】：加入多重編碼容錯讀取，防止系統特殊字元導致崩潰
+                            try:
+                                df_data = pd.read_csv(data_io, header=None, encoding='utf-8')
+                            except UnicodeDecodeError:
+                                data_io.seek(0)
+                                df_data = pd.read_csv(data_io, header=None, encoding='cp1252', errors='replace')
                         else:
                             xls_data = pd.ExcelFile(data_io)
                             target_sheet = xls_data.sheet_names[0]
@@ -119,7 +128,9 @@ if uploaded_files:
                                 header_idx = i; break
                                 
                         if header_idx != -1:
-                            df_data.columns = df_data.iloc[header_idx]
+                            # 【修復 2】：強制轉字串並去重複，防止系統匯出檔有兩個相同的欄位名稱導致 DataFrame 錯誤
+                            df_data.columns = [str(c) for c in df_data.iloc[header_idx]]
+                            df_data = df_data.loc[:, ~df_data.columns.duplicated(keep='first')]
                             df_data = df_data.iloc[header_idx + 1:].reset_index(drop=True)
                             
                             def norm_c(col_name): return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
@@ -128,7 +139,7 @@ if uploaded_files:
                             dpci_col = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
                             sub_col = cat_cols_map.get("SUBCLASSNAME", cat_cols_map.get("CATEGORY"))
                             fact_col = cat_cols_map.get("PRODUCTBUSINESSPARTNER", cat_cols_map.get("IMPORTVENDORNAME", cat_cols_map.get("VENDOR")))
-                            qty_col = cat_cols_map.get("TOTALUNITS", cat_cols_map.get("QTY", cat_cols_map.get("ENTTTLRCPTU")))
+                            qty_col = cat_cols_map.get("ENTTTLRCPTU", cat_cols_map.get("TOTALUNITS", cat_cols_map.get("QTY")))
                             
                             if dpci_col:
                                 clean_dpci = df_data[dpci_col].astype(str).str.replace("-", "").str.strip()
@@ -165,6 +176,7 @@ if uploaded_files:
                                 if val_clean == 'DPCI':
                                     dpci = ""
                                     for offset in range(1, 5):
+                                        if c+offset > sheet.max_column: break
                                         v = str(sheet.cell(row=r, column=c+offset).value).strip()
                                         if v and v.lower() != 'none':
                                             dpci = v; break
@@ -177,6 +189,7 @@ if uploaded_files:
                                         c_val = clean_string(sheet.cell(row=r+i, column=c).value)
                                         if 'DESCRIPTION' in c_val:
                                             for offset in range(1, 5):
+                                                if c+offset > sheet.max_column: break
                                                 v = str(sheet.cell(row=r+i, column=c+offset).value).strip()
                                                 if v and v.lower() != 'none':
                                                     desc = v; break
@@ -190,6 +203,7 @@ if uploaded_files:
                                             q_val = clean_string(sheet.cell(row=r+i, column=j).value)
                                             if 'QTY' in q_val or 'CASEPACK' in q_val:
                                                 for offset in range(1, 5):
+                                                    if j+offset > sheet.max_column: break
                                                     v = str(sheet.cell(row=r+i, column=j+offset).value).strip()
                                                     if v and v.lower() != 'none':
                                                         qty = v
@@ -207,6 +221,7 @@ if uploaded_files:
                                             raw_fact = str(sheet.cell(row=r+i, column=c).value).strip().replace('"', '')
                                             if len(raw_fact) < 10 or raw_fact.endswith(':'):
                                                 for offset in range(1, 5):
+                                                    if c+offset > sheet.max_column: break
                                                     v = str(sheet.cell(row=r+i, column=c+offset).value).strip()
                                                     if v and v.lower() != 'none':
                                                         raw_fact = v; break
@@ -344,7 +359,6 @@ if uploaded_files:
                                         if img_path:
                                             try:
                                                 with Image.open(img_path) as img:
-                                                    # 處理透明背景或特殊格式
                                                     if img.mode in ("RGBA", "P"): img = img.convert("RGB")
                                                     img.thumbnail((100, 100))
                                                     resized_path = os.path.join(temp_dir, f"resized_{i}.png")
@@ -379,7 +393,7 @@ if uploaded_files:
                     )
                     
                 except Exception as e:
-                    st.error(f"❌ 處理檔案時發生錯誤: {e}")
+                    st.error(f"❌ 處理檔案時發生內部錯誤: {str(e)}")
 
 else:
     st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案與圖片 ZIP 檔。")
