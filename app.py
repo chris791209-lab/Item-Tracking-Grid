@@ -5,9 +5,6 @@ import os
 import tempfile
 import zipfile
 import openpyxl
-from openpyxl_image_loader import SheetImageLoader
-from openpyxl.utils import get_column_letter
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from PIL import Image
 
 # ==========================================
@@ -42,7 +39,7 @@ if not check_password():
 # 1. 主程式標題 
 # ==========================================
 st.title("🎃 D240 Item Tracking Grid自動生成工具")
-st.markdown("請上傳專案檔案。系統將自動解析所有 Program Sheet，並強制執行**無邊界圖片配對**，最後從 Data 表補齊缺失的資訊。")
+st.markdown("請上傳專案檔案與圖片 ZIP 包。系統將自動解析 Program Sheet，並透過 DPCI 完美匹配您上傳的圖片。")
 
 # ==========================================
 # 2. 檔案上傳與選項
@@ -52,15 +49,9 @@ uploaded_files = st.file_uploader("📁 請將 [所有的 Program Sheet] 與 [Da
                                   type=["xlsx", "xls", "csv"], 
                                   accept_multiple_files=True)
 
-st.markdown("### 🖼️ 步驟 2：選擇圖片來源")
-img_option = st.radio("請選擇您的圖片提供方式：", [
-    "1. 🗂️ 從 Program Sheet 卡片自動萃取 (包含無邊界距離強制鎖定)",
-    "2. 📁 上傳 ZIP 壓縮檔 (檔名需對應 DPCI)"
-])
-
-uploaded_zip = None
-if img_option.startswith("2"):
-    uploaded_zip = st.file_uploader("📁 請上傳 .zip 圖片壓縮檔", type=["zip"])
+st.markdown("### 🖼️ 步驟 2：上傳圖片壓縮檔")
+st.info("💡 請將所有商品圖片放入一個 ZIP 壓縮檔中上傳。**圖片檔名請設定為 DPCI**（例如：`240-43-1234.png` 或 `240431234.jpg`）。")
+uploaded_zip = st.file_uploader("📁 請上傳 .zip 圖片壓縮檔 (選填)", type=["zip"])
 
 st.divider() 
 
@@ -95,16 +86,17 @@ if uploaded_files:
             st.error("❌ 找不到 Program Sheet！請確認檔案是否正確上傳。")
             st.stop()
             
-        with st.spinner("多檔聯合解析中，執行全域圖片比對可能需要一分鐘，請稍候..."):
+        with st.spinner("資料解析與圖片配對中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
-                    if img_option.startswith("2") and uploaded_zip:
+                    # --- 安全處理 ZIP 圖片解壓縮 ---
+                    if uploaded_zip:
                         zip_io = io.BytesIO(uploaded_zip.getvalue())
                         with zipfile.ZipFile(zip_io, 'r') as zip_ref:
                             zip_ref.extractall(temp_dir)
 
                     # ---------------------------------------------------------
-                    # 步驟 A: 建立 Data 表字典
+                    # 步驟 A: 建立 Data 表字典 (VLOOKUP 來源)
                     # ---------------------------------------------------------
                     cat_mapping = {}
                     fact_mapping = {}
@@ -147,15 +139,14 @@ if uploaded_files:
                                 if qty_col: qty_mapping.update(dict(zip(clean_dpci, df_data[qty_col])))
 
                     # ---------------------------------------------------------
-                    # 步驟 B: 解析所有 Program Sheet 卡片
+                    # 步驟 B: 解析所有 Program Sheet 卡片文字資料
                     # ---------------------------------------------------------
                     parsed_items = []
                     
                     for m_file in master_files:
-                        master_io_pd = io.BytesIO(m_file.getvalue()) 
                         master_io_px = io.BytesIO(m_file.getvalue()) 
                         
-                        xls_master = pd.ExcelFile(master_io_pd)
+                        xls_master = pd.ExcelFile(master_io_px)
                         m_sheet = xls_master.sheet_names[-1]
                         for s in xls_master.sheet_names:
                             if "MASTER" in s.upper() or "PROGRAM" in s.upper() or "PS" in s.upper():
@@ -163,18 +154,6 @@ if uploaded_files:
                                 
                         wb = openpyxl.load_workbook(master_io_px, data_only=True)
                         sheet = wb[m_sheet]
-                        
-                        image_loader = None
-                        used_images = set() 
-                        
-                        if img_option.startswith("1"):
-                            try: 
-                                image_loader = SheetImageLoader(sheet)
-                                # 【新增回報】：顯示系統到底「看」到了幾張圖片
-                                total_imgs = len(image_loader._images)
-                                st.info(f"📊 檔案 [{m_file.name}] 系統底層偵測到 {total_imgs} 張圖片。")
-                            except Exception as e: 
-                                st.warning(f"⚠️ 無法讀取 [{m_file.name}] 的圖片格式: {e}")
                         
                         for r in range(1, sheet.max_row + 1):
                             for c in range(1, sheet.max_column + 1):
@@ -192,64 +171,6 @@ if uploaded_files:
                                     
                                     if not dpci: continue
                                     
-                                    # ==========================================
-                                    # 🖼️ 無邊界圖片鎖定邏輯
-                                    # ==========================================
-                                    img_obj = None
-                                    if img_option.startswith("1") and image_loader:
-                                        found_img_cell = None
-                                        
-                                        # 第一層：大範圍雷達掃描
-                                        for row_offset in range(-15, 30):
-                                            for col_offset in range(-10, 20):
-                                                c_idx = max(1, c + col_offset)
-                                                r_idx = max(1, r - row_offset)
-                                                img_cell = f"{get_column_letter(c_idx)}{r_idx}"
-                                                
-                                                if image_loader.image_in(img_cell) and img_cell not in used_images:
-                                                    found_img_cell = img_cell
-                                                    break
-                                            if found_img_cell: break
-                                            
-                                        if found_img_cell:
-                                            try:
-                                                raw_img = image_loader.get(found_img_cell)
-                                                img_obj = raw_img.copy() 
-                                                used_images.add(found_img_cell)
-                                            except: pass
-                                        else:
-                                            # 第二層：無邊界強制配對 (找出整張表距離最近且未使用的圖片)
-                                            try:
-                                                min_dist = 999999
-                                                closest_cell = None
-                                                for img_c in image_loader._images.keys():
-                                                    if img_c in used_images: continue
-                                                    
-                                                    col_str, row_num = coordinate_from_string(img_c)
-                                                    img_col_idx = column_index_from_string(col_str)
-                                                    
-                                                    # 距離計算 (稍微加重水平偏移的懲罰)
-                                                    dist = abs(r - row_num) + (abs(c - img_col_idx) * 2)
-                                                    if dist < min_dist:
-                                                        min_dist = dist
-                                                        closest_cell = img_c
-                                                        
-                                                if closest_cell:
-                                                    raw_img = image_loader.get(closest_cell)
-                                                    img_obj = raw_img.copy() 
-                                                    used_images.add(closest_cell)
-                                            except: pass
-                                            
-                                        if img_obj:
-                                            safe_name = "".join(x for x in dpci if x.isalnum() or x in "-_")
-                                            if safe_name.endswith('.0'): safe_name = safe_name[:-2]
-                                            try: 
-                                                # 如果原圖是 RGBA (去背圖)，轉換為 RGB 以避免儲存錯誤
-                                                if img_obj.mode in ("RGBA", "P"):
-                                                    img_obj = img_obj.convert("RGB")
-                                                img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
-                                            except: pass
-                                            
                                     desc = ""
                                     for i in range(1, 20):
                                         if r+i > sheet.max_row: break
@@ -342,7 +263,7 @@ if uploaded_files:
                         if col not in df_out.columns: df_out[col] = ""
 
                     # ---------------------------------------------------------
-                    # 步驟 D: XlsxWriter 進階排版
+                    # 步驟 D: XlsxWriter 進階排版與 ZIP 圖片精準配對
                     # ---------------------------------------------------------
                     output = io.BytesIO()
                     img_insert_count = 0
@@ -395,8 +316,12 @@ if uploaded_files:
                                 safe_name = "".join(x for x in dpci_val if x.isalnum() or x in "-_")
                                 if safe_name.endswith('.0'): safe_name = safe_name[:-2]
                                 
+                                # 🔍 在 ZIP 解壓縮的資料夾中尋找對應檔名的圖片
                                 img_path = None
-                                search_names = [f"{safe_name}.png", f"{safe_name}.jpg", f"{dpci_val.lower()}.png"]
+                                search_names = [
+                                    f"{safe_name}.png", f"{safe_name}.jpg", f"{safe_name}.jpeg",
+                                    f"{dpci_val.lower()}.png", f"{dpci_val.lower()}.jpg", f"{dpci_val.lower()}.jpeg"
+                                ]
                                 for root, dirs, files in os.walk(temp_dir):
                                     for file in files:
                                         if file.lower() in [s.lower() for s in search_names]:
@@ -419,6 +344,8 @@ if uploaded_files:
                                         if img_path:
                                             try:
                                                 with Image.open(img_path) as img:
+                                                    # 處理透明背景或特殊格式
+                                                    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
                                                     img.thumbnail((100, 100))
                                                     resized_path = os.path.join(temp_dir, f"resized_{i}.png")
                                                     img.save(resized_path, "PNG")
@@ -455,4 +382,4 @@ if uploaded_files:
                     st.error(f"❌ 處理檔案時發生錯誤: {e}")
 
 else:
-    st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案 (包含 Program Sheet 與 Data)。")
+    st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案與圖片 ZIP 檔。")
