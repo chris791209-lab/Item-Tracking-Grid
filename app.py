@@ -38,36 +38,47 @@ if not check_password():
 # ==========================================
 # 1. 主程式標題 
 # ==========================================
-st.title("🎃 D240 Item Tracking Grid自動生成工具 (雙引擎 ZIP 版)")
-st.markdown("請上傳您的任何專案檔案 (Program Sheet 或 Data 表皆可)。系統會**智慧解析**內容，並透過 DPCI 完美匹配您上傳的圖片 ZIP 包！")
+st.title("🎃 D240 Item Tracking Grid自動生成工具")
+st.markdown("請上傳您的專案檔案 (Program Sheet 或 Data 表)。系統會智慧解析內容，並透過 DPCI 完美匹配您上傳的圖片 ZIP 包！")
 
 # ==========================================
 # 2. 檔案上傳區塊
 # ==========================================
 st.markdown("### 📄 步驟 1：上傳資料檔案")
-uploaded_files = st.file_uploader("📁 請將 [Program Sheet] 與 [Data 表] 一同拖曳至此 (不限檔名，系統會自動辨識)", 
+uploaded_files = st.file_uploader("📁 請將 [Program Sheet] 與 [Data 表] 一同拖曳至此", 
                                   type=["xlsx", "xls", "csv"], 
                                   accept_multiple_files=True)
 
 st.markdown("### 🖼️ 步驟 2：上傳圖片 ZIP 壓縮檔 (一勞永逸配對法)")
-st.info("💡 將所有圖片放入一個 ZIP 壓縮檔。**圖片檔名請設定為 DPCI**（例：`240-02-1234.png` 或 `240021234.jpg`）。")
+st.info("💡 將所有圖片放入 ZIP 壓縮檔。**圖片檔名請設定為 DPCI**（例：`240-02-1234.png` 或 `240021234.jpg`）。")
 uploaded_zip = st.file_uploader("📁 請上傳 .zip 圖片壓縮檔", type=["zip"])
 
 st.divider() 
 
-# 工具函式
+# 🛠️ 工具函式
 def clean_string(val):
     return str(val).replace(' ', '').replace(':', '').replace('#', '').replace('\n', '').replace('\r', '').upper()
 
 def clean_dpci_for_map(d):
     return str(d).replace('-', '').strip()
 
+# 💡 圖片白底轉換函式 (解決去背圖變黑的問題)
+def add_white_background(img):
+    if img.mode in ('RGBA', 'LA') or (img.mode == 'P' and 'transparency' in img.info):
+        img = img.convert('RGBA')
+        bg = Image.new('RGB', img.size, (255, 255, 255))
+        bg.paste(img, mask=img.split()[3]) # 利用 Alpha 通道當遮罩，把商品貼到白底上
+        return bg
+    elif img.mode != 'RGB':
+        return img.convert('RGB')
+    return img
+
 # ==========================================
-# 3. 核心雙引擎處理邏輯
+# 3. 核心處理邏輯
 # ==========================================
 if uploaded_files:
     if st.button("✨ 智慧生成 Item Tracking Grid", type="primary"):
-        with st.spinner("雙引擎聯合解析中與圖片配對中，請稍候..."):
+        with st.spinner("雙引擎聯合解析與圖片配對中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
                     # --- 1. 解壓縮圖片包 ---
@@ -76,16 +87,15 @@ if uploaded_files:
                         with zipfile.ZipFile(zip_io, 'r') as zip_ref:
                             zip_ref.extractall(temp_dir)
 
-                    # --- 2. 準備雙引擎暫存 ---
-                    tabular_items = []  # 存放從數據表格解析出的商品
-                    parsed_items = []   # 存放從卡片排版解析出的商品
+                    tabular_items = []  
+                    parsed_items = []   
                     
                     cat_mapping = {}
                     fact_mapping = {}
                     qty_mapping = {}
                     desc_mapping = {}
 
-                    # --- 3. 聯合讀取所有檔案 ---
+                    # --- 2. 聯合讀取所有檔案 ---
                     for file in uploaded_files:
                         file_ext = file.name.lower()
                         file_bytes = file.getvalue()
@@ -97,7 +107,6 @@ if uploaded_files:
                             except UnicodeDecodeError:
                                 df = pd.read_csv(io.BytesIO(file_bytes), header=None, encoding='cp1252', errors='replace')
                             
-                            # 尋找表頭
                             header_idx = -1
                             for i in range(min(20, len(df))):
                                 row_vals = [str(v).strip().upper() for v in df.iloc[i].values]
@@ -146,7 +155,6 @@ if uploaded_files:
                             for sheet_name in xls.sheet_names:
                                 df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
                                 
-                                # 嘗試做數據表格解析
                                 header_idx = -1
                                 for i in range(min(20, len(df))):
                                     row_vals = [str(v).strip().upper() for v in df.iloc[i].values]
@@ -191,7 +199,7 @@ if uploaded_files:
                                             
                                             tabular_items.append({'DPCI': raw_dpci, 'ITEM_DESC': desc if desc.lower() != 'nan' else "", 'Factory Name': fact if fact.lower() != 'nan' else "", 'Factory ID': "", 'QTY': qty if qty.lower() != 'nan' else ""})
 
-                                # 如果不是數據表格，就用卡片排版掃描器
+                                # 若非資料表，啟動卡片排版掃描器
                                 if not is_tabular:
                                     wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
                                     sheet = wb[sheet_name]
@@ -261,12 +269,10 @@ if uploaded_files:
                                                     'QTY': qty
                                                 })
 
-                    # --- 4. 決策最終資料來源 ---
-                    # 如果有卡片排版，以卡片為主要資料；如果完全沒有卡片，則把數據表格當作主要資料！
+                    # --- 3. 決策資料來源 ---
                     if len(parsed_items) > 0:
                         final_items = parsed_items
                     else:
-                        # 移除表格資料中可能重複的 DPCI
                         unique_tabular = []
                         seen_dpcis = set()
                         for item in tabular_items:
@@ -282,7 +288,7 @@ if uploaded_files:
                     
                     df_out = pd.DataFrame(final_items)
 
-                    # --- 5. 終極 VLOOKUP 補齊資料 ---
+                    # --- 4. 終極 VLOOKUP 補齊資料 ---
                     df_out['CATEGORY'] = df_out['DPCI'].apply(lambda x: cat_mapping.get(clean_dpci_for_map(x), ""))
                     df_out['Factory Name'] = df_out.apply(lambda r: fact_mapping.get(clean_dpci_for_map(r['DPCI']), "") if not r['Factory Name'] else r['Factory Name'], axis=1)
                     df_out['QTY'] = df_out.apply(lambda r: qty_mapping.get(clean_dpci_for_map(r['DPCI']), "") if not r['QTY'] else r['QTY'], axis=1)
@@ -306,7 +312,7 @@ if uploaded_files:
                     for col in target_columns:
                         if col not in df_out.columns: df_out[col] = ""
 
-                    # --- 6. XlsxWriter 進階排版與 ZIP 圖片綁定 ---
+                    # --- 5. XlsxWriter 排版與 ZIP 圖片綁定 ---
                     output = io.BytesIO()
                     img_insert_count = 0
                     
@@ -356,12 +362,14 @@ if uploaded_files:
                                 dpci_val = str(df_out.iloc[i]['DPCI']).strip()
                                 safe_name = "".join(x for x in dpci_val if x.isalnum() or x in "-_")
                                 if safe_name.endswith('.0'): safe_name = safe_name[:-2]
+                                clean_dpci_img = safe_name.replace('-', '')
                                 
+                                # 🔍 在 ZIP 中精準比對檔名
                                 img_path = None
                                 search_names = [
                                     f"{safe_name}.png", f"{safe_name}.jpg", f"{safe_name}.jpeg",
                                     f"{dpci_val.lower()}.png", f"{dpci_val.lower()}.jpg", f"{dpci_val.lower()}.jpeg",
-                                    f"{dpci_val}.png", f"{dpci_val}.jpg", f"{dpci_val}.jpeg"
+                                    f"{clean_dpci_img}.png", f"{clean_dpci_img}.jpg", f"{clean_dpci_img}.jpeg"
                                 ]
                                 for root, dirs, files in os.walk(temp_dir):
                                     for file in files:
@@ -385,7 +393,8 @@ if uploaded_files:
                                         if img_path:
                                             try:
                                                 with Image.open(img_path) as img:
-                                                    if img.mode in ("RGBA", "P"): img = img.convert("RGB")
+                                                    # 👉 呼叫白底轉換函式，消除去背圖變黑的問題
+                                                    img = add_white_background(img)
                                                     img.thumbnail((100, 100))
                                                     resized_path = os.path.join(temp_dir, f"resized_{i}.png")
                                                     img.save(resized_path, "PNG")
@@ -409,7 +418,7 @@ if uploaded_files:
 
                     processed_data = output.getvalue()
                     
-                    st.success(f"✅ 處理完成！共解析出 **{len(df_out)}** 筆商品，並從 ZIP 檔中成功置入 **{img_insert_count}** 張圖片。")
+                    st.success(f"✅ 處理完成！共解析出 **{len(df_out)}** 筆商品，並從 ZIP 檔中成功置入 **{img_insert_count}** 張完美白底圖片。")
                     
                     st.download_button(
                         label="📥 下載 Item Tracking Grid.xlsx",
