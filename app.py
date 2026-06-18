@@ -5,9 +5,6 @@ import os
 import tempfile
 import zipfile
 import openpyxl
-from openpyxl_image_loader import SheetImageLoader
-from openpyxl.utils import get_column_letter
-from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from PIL import Image
 
 # ==========================================
@@ -41,226 +38,258 @@ if not check_password():
 # ==========================================
 # 1. 主程式標題 
 # ==========================================
-st.title("🎃 D240 Item Tracking Grid自動生成工具")
-st.markdown("請上傳專案檔案與圖片 ZIP 包。系統將自動解析 Program Sheet，並透過 DPCI 完美匹配您上傳的圖片。")
+st.title("🎃 D240 Item Tracking Grid自動生成工具 (雙引擎 ZIP 版)")
+st.markdown("請上傳您的任何專案檔案 (Program Sheet 或 Data 表皆可)。系統會**智慧解析**內容，並透過 DPCI 完美匹配您上傳的圖片 ZIP 包！")
 
 # ==========================================
-# 2. 檔案上傳與選項
+# 2. 檔案上傳區塊
 # ==========================================
 st.markdown("### 📄 步驟 1：上傳資料檔案")
-uploaded_files = st.file_uploader("📁 請將 [所有的 Program Sheet] 與 [Data 表] 一同拖曳至此", 
+uploaded_files = st.file_uploader("📁 請將 [Program Sheet] 與 [Data 表] 一同拖曳至此 (不限檔名，系統會自動辨識)", 
                                   type=["xlsx", "xls", "csv"], 
                                   accept_multiple_files=True)
 
-st.markdown("### 🖼️ 步驟 2：上傳圖片壓縮檔")
-st.info("💡 請將所有商品圖片放入一個 ZIP 壓縮檔中上傳。**圖片檔名請設定為 DPCI**（例如：`240-43-1234.png` 或 `240431234.jpg`）。")
-uploaded_zip = st.file_uploader("📁 請上傳 .zip 圖片壓縮檔 (選填)", type=["zip"])
+st.markdown("### 🖼️ 步驟 2：上傳圖片 ZIP 壓縮檔 (一勞永逸配對法)")
+st.info("💡 將所有圖片放入一個 ZIP 壓縮檔。**圖片檔名請設定為 DPCI**（例：`240-02-1234.png` 或 `240021234.jpg`）。")
+uploaded_zip = st.file_uploader("📁 請上傳 .zip 圖片壓縮檔", type=["zip"])
 
 st.divider() 
 
+# 工具函式
 def clean_string(val):
-    return str(val).replace(' ', '').replace(':', '').replace('#', '').upper()
+    return str(val).replace(' ', '').replace(':', '').replace('#', '').replace('\n', '').replace('\r', '').upper()
+
+def clean_dpci_for_map(d):
+    return str(d).replace('-', '').strip()
 
 # ==========================================
-# 3. 核心處理邏輯
+# 3. 核心雙引擎處理邏輯
 # ==========================================
 if uploaded_files:
-    master_files = []
-    data_files = []
-    
-    for file in uploaded_files:
-        fname = file.name.upper()
-        if "TRACKING" in fname or "GRID" in fname or "AUTOMATED" in fname:
-            continue
-        
-        if "DATA" in fname or "WRK" in fname:
-            data_files.append(file)
-        elif "PROGRAM" in fname or "MASTER" in fname or "SHEET" in fname or "PS" in fname:
-            master_files.append(file)
-        else:
-            if file.name.endswith('.csv'): data_files.append(file)
-            else: master_files.append(file)
-
-    master_files = list(set(master_files))
-    data_files = list(set(data_files))
-
     if st.button("✨ 智慧生成 Item Tracking Grid", type="primary"):
-        if not master_files:
-            st.error("❌ 找不到 Program Sheet！請確認您有上傳包含商品卡片的 Excel 檔案。")
-            st.stop()
-            
-        with st.spinner("資料解析與圖片配對中，請稍候..."):
+        with st.spinner("雙引擎聯合解析中與圖片配對中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
-                    # --- 安全處理 ZIP 圖片解壓縮 ---
+                    # --- 1. 解壓縮圖片包 ---
                     if uploaded_zip:
                         zip_io = io.BytesIO(uploaded_zip.getvalue())
                         with zipfile.ZipFile(zip_io, 'r') as zip_ref:
                             zip_ref.extractall(temp_dir)
 
-                    # ---------------------------------------------------------
-                    # 步驟 A: 建立 Data 表字典 (強化系統 CSV 讀取能力)
-                    # ---------------------------------------------------------
+                    # --- 2. 準備雙引擎暫存 ---
+                    tabular_items = []  # 存放從數據表格解析出的商品
+                    parsed_items = []   # 存放從卡片排版解析出的商品
+                    
                     cat_mapping = {}
                     fact_mapping = {}
                     qty_mapping = {}
-                    
-                    for d_file in data_files:
-                        data_io = io.BytesIO(d_file.getvalue()) 
-                        
-                        if d_file.name.endswith('.csv'):
-                            # 【修復 1】：加入多重編碼容錯讀取，防止系統特殊字元導致崩潰
-                            try:
-                                df_data = pd.read_csv(data_io, header=None, encoding='utf-8')
-                            except UnicodeDecodeError:
-                                data_io.seek(0)
-                                df_data = pd.read_csv(data_io, header=None, encoding='cp1252', errors='replace')
-                        else:
-                            xls_data = pd.ExcelFile(data_io)
-                            target_sheet = xls_data.sheet_names[0]
-                            for s in xls_data.sheet_names:
-                                if "DATA" in s.upper() or "PRODUCT" in s.upper(): target_sheet = s; break
-                            df_data = pd.read_excel(xls_data, sheet_name=target_sheet, header=None)
-                            
-                        header_idx = -1
-                        for i in range(min(20, len(df_data))):
-                            if any('DPCI' in str(v).strip().upper() for v in df_data.iloc[i].values):
-                                header_idx = i; break
-                                
-                        if header_idx != -1:
-                            # 【修復 2】：強制轉字串並去重複，防止系統匯出檔有兩個相同的欄位名稱導致 DataFrame 錯誤
-                            df_data.columns = [str(c) for c in df_data.iloc[header_idx]]
-                            df_data = df_data.loc[:, ~df_data.columns.duplicated(keep='first')]
-                            df_data = df_data.iloc[header_idx + 1:].reset_index(drop=True)
-                            
-                            def norm_c(col_name): return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
-                            cat_cols_map = {norm_c(c): c for c in df_data.columns}
-                            
-                            dpci_col = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
-                            sub_col = cat_cols_map.get("SUBCLASSNAME", cat_cols_map.get("CATEGORY"))
-                            fact_col = cat_cols_map.get("PRODUCTBUSINESSPARTNER", cat_cols_map.get("IMPORTVENDORNAME", cat_cols_map.get("VENDOR")))
-                            qty_col = cat_cols_map.get("ENTTTLRCPTU", cat_cols_map.get("TOTALUNITS", cat_cols_map.get("QTY")))
-                            
-                            if dpci_col:
-                                clean_dpci = df_data[dpci_col].astype(str).str.replace("-", "").str.strip()
-                                clean_dpci = clean_dpci.apply(lambda x: x[:-2] if x.endswith('.0') else x)
-                                
-                                if sub_col: cat_mapping.update(dict(zip(clean_dpci, df_data[sub_col])))
-                                if fact_col: fact_mapping.update(dict(zip(clean_dpci, df_data[fact_col])))
-                                if qty_col: qty_mapping.update(dict(zip(clean_dpci, df_data[qty_col])))
+                    desc_mapping = {}
 
-                    # ---------------------------------------------------------
-                    # 步驟 B: 解析所有 Program Sheet 卡片文字資料
-                    # ---------------------------------------------------------
-                    parsed_items = []
-                    
-                    for m_file in master_files:
-                        master_io_px = io.BytesIO(m_file.getvalue()) 
+                    # --- 3. 聯合讀取所有檔案 ---
+                    for file in uploaded_files:
+                        file_ext = file.name.lower()
+                        file_bytes = file.getvalue()
                         
-                        xls_master = pd.ExcelFile(master_io_px)
-                        m_sheet = xls_master.sheet_names[-1]
-                        for s in xls_master.sheet_names:
-                            if "MASTER" in s.upper() or "PROGRAM" in s.upper() or "PS" in s.upper():
-                                m_sheet = s; break
-                                
-                        wb = openpyxl.load_workbook(master_io_px, data_only=True)
-                        sheet = wb[m_sheet]
-                        
-                        for r in range(1, sheet.max_row + 1):
-                            for c in range(1, sheet.max_column + 1):
-                                cell_val = sheet.cell(row=r, column=c).value
-                                if cell_val is None: continue
-                                
-                                val_clean = clean_string(cell_val)
-                                
-                                if val_clean == 'DPCI':
-                                    dpci = ""
-                                    for offset in range(1, 5):
-                                        if c+offset > sheet.max_column: break
-                                        v = str(sheet.cell(row=r, column=c+offset).value).strip()
-                                        if v and v.lower() != 'none':
-                                            dpci = v; break
+                        # (A) 處理 CSV 格式
+                        if file_ext.endswith('.csv'):
+                            try:
+                                df = pd.read_csv(io.BytesIO(file_bytes), header=None, encoding='utf-8')
+                            except UnicodeDecodeError:
+                                df = pd.read_csv(io.BytesIO(file_bytes), header=None, encoding='cp1252', errors='replace')
+                            
+                            # 尋找表頭
+                            header_idx = -1
+                            for i in range(min(20, len(df))):
+                                row_vals = [str(v).strip().upper() for v in df.iloc[i].values]
+                                if any('DPCI' in v for v in row_vals) and (any('DESCRIPTION' in v for v in row_vals) or any('VENDOR' in v for v in row_vals) or any('SUBCLASS' in v for v in row_vals)):
+                                    header_idx = i; break
                                     
-                                    if not dpci: continue
+                            if header_idx != -1:
+                                df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
+                                df = df.loc[:, ~df.columns.duplicated(keep='first')]
+                                df = df.iloc[header_idx + 1:].reset_index(drop=True)
+                                
+                                def get_col(candidates):
+                                    for c in candidates:
+                                        for col in df.columns:
+                                            if c in col.replace(' ', '').replace('_', ''): return col
+                                    return None
                                     
-                                    desc = ""
-                                    for i in range(1, 20):
-                                        if r+i > sheet.max_row: break
-                                        c_val = clean_string(sheet.cell(row=r+i, column=c).value)
-                                        if 'DESCRIPTION' in c_val:
-                                            for offset in range(1, 5):
-                                                if c+offset > sheet.max_column: break
-                                                v = str(sheet.cell(row=r+i, column=c+offset).value).strip()
-                                                if v and v.lower() != 'none':
-                                                    desc = v; break
-                                            break
-                                                
-                                    qty = ""
-                                    for i in range(1, 20):
-                                        if r+i > sheet.max_row: break
-                                        found_qty = False
-                                        for j in range(c, min(c+12, sheet.max_column + 1)):
-                                            q_val = clean_string(sheet.cell(row=r+i, column=j).value)
-                                            if 'QTY' in q_val or 'CASEPACK' in q_val:
-                                                for offset in range(1, 5):
-                                                    if j+offset > sheet.max_column: break
-                                                    v = str(sheet.cell(row=r+i, column=j+offset).value).strip()
-                                                    if v and v.lower() != 'none':
-                                                        qty = v
-                                                        if qty.endswith('.0'): qty = qty[:-2]
-                                                        found_qty = True; break
-                                                if found_qty: break
-                                        if found_qty: break
+                                dpci_col = get_col(['DPCI'])
+                                desc_col = get_col(['PRODUCTDESCRIPTION', 'ITEMDESC', 'DESCRIPTION'])
+                                fact_col = get_col(['PRODUCTBUSINESSPARTNER', 'IMPORTVENDORNAME', 'VENDOR', 'FACTORY'])
+                                qty_col = get_col(['TOTALUNITS', 'ENTTTLRCPTU', 'QTY', 'CASEPACK'])
+                                cat_col = get_col(['SUBCLASSNAME', 'CATEGORY'])
+                                
+                                if dpci_col:
+                                    for _, row in df.iterrows():
+                                        raw_dpci = str(row[dpci_col]).strip()
+                                        if raw_dpci.lower() in ['nan', 'none', '']: continue
+                                        dpci_key = clean_dpci_for_map(raw_dpci)
+                                        if dpci_key.endswith('.0'): dpci_key = dpci_key[:-2]
                                         
-                                    factory_name = ""
-                                    factory_id = ""
-                                    for i in range(1, 20):
-                                        if r+i > sheet.max_row: break
-                                        f_val = clean_string(sheet.cell(row=r+i, column=c).value)
-                                        if 'FACTORY' in f_val or 'VENDOR' in f_val:
-                                            raw_fact = str(sheet.cell(row=r+i, column=c).value).strip().replace('"', '')
-                                            if len(raw_fact) < 10 or raw_fact.endswith(':'):
+                                        desc = str(row[desc_col]).strip() if desc_col else ""
+                                        fact = str(row[fact_col]).strip() if fact_col else ""
+                                        qty = str(row[qty_col]).strip() if qty_col else ""
+                                        cat = str(row[cat_col]).strip() if cat_col else ""
+                                        
+                                        if desc and desc.lower() != 'nan': desc_mapping[dpci_key] = desc
+                                        if fact and fact.lower() != 'nan': fact_mapping[dpci_key] = fact
+                                        if qty and qty.lower() != 'nan': qty_mapping[dpci_key] = qty
+                                        if cat and cat.lower() != 'nan': cat_mapping[dpci_key] = cat
+                                        
+                                        tabular_items.append({'DPCI': raw_dpci, 'ITEM_DESC': desc if desc.lower() != 'nan' else "", 'Factory Name': fact if fact.lower() != 'nan' else "", 'Factory ID': "", 'QTY': qty if qty.lower() != 'nan' else ""})
+
+                        # (B) 處理 Excel 格式
+                        elif file_ext.endswith(('.xlsx', '.xls')):
+                            xls = pd.ExcelFile(io.BytesIO(file_bytes))
+                            for sheet_name in xls.sheet_names:
+                                df = pd.read_excel(xls, sheet_name=sheet_name, header=None)
+                                
+                                # 嘗試做數據表格解析
+                                header_idx = -1
+                                for i in range(min(20, len(df))):
+                                    row_vals = [str(v).strip().upper() for v in df.iloc[i].values]
+                                    if any('DPCI' in v for v in row_vals) and (any('DESCRIPTION' in v for v in row_vals) or any('VENDOR' in v for v in row_vals) or any('SUBCLASS' in v for v in row_vals)):
+                                        header_idx = i; break
+                                
+                                is_tabular = False
+                                if header_idx != -1:
+                                    is_tabular = True
+                                    df.columns = [str(c).strip().upper() for c in df.iloc[header_idx]]
+                                    df = df.loc[:, ~df.columns.duplicated(keep='first')]
+                                    df = df.iloc[header_idx + 1:].reset_index(drop=True)
+                                    
+                                    def get_col(candidates):
+                                        for c in candidates:
+                                            for col in df.columns:
+                                                if c in col.replace(' ', '').replace('_', ''): return col
+                                        return None
+                                        
+                                    dpci_col = get_col(['DPCI'])
+                                    desc_col = get_col(['PRODUCTDESCRIPTION', 'ITEMDESC', 'DESCRIPTION'])
+                                    fact_col = get_col(['PRODUCTBUSINESSPARTNER', 'IMPORTVENDORNAME', 'VENDOR', 'FACTORY'])
+                                    qty_col = get_col(['TOTALUNITS', 'ENTTTLRCPTU', 'QTY', 'CASEPACK'])
+                                    cat_col = get_col(['SUBCLASSNAME', 'CATEGORY'])
+                                    
+                                    if dpci_col:
+                                        for _, row in df.iterrows():
+                                            raw_dpci = str(row[dpci_col]).strip()
+                                            if raw_dpci.lower() in ['nan', 'none', '']: continue
+                                            dpci_key = clean_dpci_for_map(raw_dpci)
+                                            if dpci_key.endswith('.0'): dpci_key = dpci_key[:-2]
+                                            
+                                            desc = str(row[desc_col]).strip() if desc_col else ""
+                                            fact = str(row[fact_col]).strip() if fact_col else ""
+                                            qty = str(row[qty_col]).strip() if qty_col else ""
+                                            cat = str(row[cat_col]).strip() if cat_col else ""
+                                            
+                                            if desc and desc.lower() != 'nan': desc_mapping[dpci_key] = desc
+                                            if fact and fact.lower() != 'nan': fact_mapping[dpci_key] = fact
+                                            if qty and qty.lower() != 'nan': qty_mapping[dpci_key] = qty
+                                            if cat and cat.lower() != 'nan': cat_mapping[dpci_key] = cat
+                                            
+                                            tabular_items.append({'DPCI': raw_dpci, 'ITEM_DESC': desc if desc.lower() != 'nan' else "", 'Factory Name': fact if fact.lower() != 'nan' else "", 'Factory ID': "", 'QTY': qty if qty.lower() != 'nan' else ""})
+
+                                # 如果不是數據表格，就用卡片排版掃描器
+                                if not is_tabular:
+                                    wb = openpyxl.load_workbook(io.BytesIO(file_bytes), data_only=True)
+                                    sheet = wb[sheet_name]
+                                    for r in range(1, sheet.max_row + 1):
+                                        for c in range(1, sheet.max_column + 1):
+                                            cell_val = str(sheet.cell(row=r, column=c).value or "").strip()
+                                            if not cell_val: continue
+                                            
+                                            val_clean = clean_string(cell_val)
+                                            dpci = ""
+                                            
+                                            if val_clean == 'DPCI':
                                                 for offset in range(1, 5):
                                                     if c+offset > sheet.max_column: break
-                                                    v = str(sheet.cell(row=r+i, column=c+offset).value).strip()
+                                                    v = str(sheet.cell(row=r, column=c+offset).value or "").strip()
                                                     if v and v.lower() != 'none':
-                                                        raw_fact = v; break
-                                                        
-                                            if ':' in raw_fact: raw_fact = raw_fact.split(':', 1)[-1].strip()
-                                            parts = raw_fact.split('/')
-                                            if len(parts) >= 1: factory_name = parts[0].strip()
-                                            if len(parts) >= 2: factory_id = parts[1].strip()
-                                            break
-                                            
-                                    parsed_items.append({
-                                        'DPCI': dpci,
-                                        'ITEM_DESC': desc,
-                                        'Factory Name': factory_name,
-                                        'Factory ID': factory_id,
-                                        'QTY': qty
-                                    })
+                                                        dpci = v; break
+                                            elif val_clean.startswith('DPCI') and len(val_clean) > 4:
+                                                dpci = cell_val.split(':')[-1].replace('#', '').strip()
+                                                
+                                            if dpci:
+                                                desc = ""
+                                                qty = ""
+                                                factory_name = ""
+                                                factory_id = ""
+                                                
+                                                for i in range(1, 20):
+                                                    if r+i > sheet.max_row: break
+                                                    if not desc:
+                                                        c_val = clean_string(sheet.cell(row=r+i, column=c).value)
+                                                        if 'DESCRIPTION' in c_val:
+                                                            for offset in range(1, 5):
+                                                                if c+offset > sheet.max_column: break
+                                                                v = str(sheet.cell(row=r+i, column=c+offset).value or "").strip()
+                                                                if v and v.lower() != 'none': desc = v; break
+                                                    if not qty:
+                                                        for j in range(c, min(c+12, sheet.max_column + 1)):
+                                                            q_val = clean_string(sheet.cell(row=r+i, column=j).value)
+                                                            if 'QTY' in q_val or 'CASEPACK' in q_val:
+                                                                for offset in range(1, 5):
+                                                                    if j+offset > sheet.max_column: break
+                                                                    v = str(sheet.cell(row=r+i, column=j+offset).value or "").strip()
+                                                                    if v and v.lower() != 'none':
+                                                                        qty = v
+                                                                        if qty.endswith('.0'): qty = qty[:-2]
+                                                                        break
+                                                                break
+                                                    if not factory_name:
+                                                        f_val = clean_string(sheet.cell(row=r+i, column=c).value)
+                                                        if 'FACTORY' in f_val or 'VENDOR' in f_val:
+                                                            raw_fact = str(sheet.cell(row=r+i, column=c).value or "").strip().replace('"', '')
+                                                            if len(raw_fact) < 10 or raw_fact.endswith(':'):
+                                                                for offset in range(1, 5):
+                                                                    if c+offset > sheet.max_column: break
+                                                                    v = str(sheet.cell(row=r+i, column=c+offset).value or "").strip()
+                                                                    if v and v.lower() != 'none': raw_fact = v; break
+                                                            if ':' in raw_fact: raw_fact = raw_fact.split(':', 1)[-1].strip()
+                                                            parts = raw_fact.split('/')
+                                                            if len(parts) >= 1: factory_name = parts[0].strip()
+                                                            if len(parts) >= 2: factory_id = parts[1].strip()
 
-                    if not parsed_items:
-                        st.warning("⚠️ 在所有上傳的檔案中皆未偵測到 DPCI。請確認您的檔案。")
+                                                parsed_items.append({
+                                                    'DPCI': dpci,
+                                                    'ITEM_DESC': desc,
+                                                    'Factory Name': factory_name,
+                                                    'Factory ID': factory_id,
+                                                    'QTY': qty
+                                                })
+
+                    # --- 4. 決策最終資料來源 ---
+                    # 如果有卡片排版，以卡片為主要資料；如果完全沒有卡片，則把數據表格當作主要資料！
+                    if len(parsed_items) > 0:
+                        final_items = parsed_items
+                    else:
+                        # 移除表格資料中可能重複的 DPCI
+                        unique_tabular = []
+                        seen_dpcis = set()
+                        for item in tabular_items:
+                            c_dpci = clean_dpci_for_map(item['DPCI'])
+                            if c_dpci not in seen_dpcis:
+                                seen_dpcis.add(c_dpci)
+                                unique_tabular.append(item)
+                        final_items = unique_tabular
+
+                    if not final_items:
+                        st.warning("⚠️ 無法在檔案中找到任何有效資料。請確認檔案格式！")
                         st.stop()
                     
-                    df_out = pd.DataFrame(parsed_items)
+                    df_out = pd.DataFrame(final_items)
 
-                    # ---------------------------------------------------------
-                    # 步驟 C: VLOOKUP 補齊資料
-                    # ---------------------------------------------------------
-                    clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
-                    
-                    if cat_mapping: df_out['CATEGORY'] = clean_main_dpci.map(cat_mapping).fillna('')
-                    else: df_out['CATEGORY'] = ""
-                    
-                    if fact_mapping:
-                        df_out['Factory Name'] = df_out.apply(lambda row: fact_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['Factory Name'] else row['Factory Name'], axis=1)
-                        
-                    if qty_mapping:
-                        df_out['QTY'] = df_out.apply(lambda row: qty_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['QTY'] else row['QTY'], axis=1)
+                    # --- 5. 終極 VLOOKUP 補齊資料 ---
+                    df_out['CATEGORY'] = df_out['DPCI'].apply(lambda x: cat_mapping.get(clean_dpci_for_map(x), ""))
+                    df_out['Factory Name'] = df_out.apply(lambda r: fact_mapping.get(clean_dpci_for_map(r['DPCI']), "") if not r['Factory Name'] else r['Factory Name'], axis=1)
+                    df_out['QTY'] = df_out.apply(lambda r: qty_mapping.get(clean_dpci_for_map(r['DPCI']), "") if not r['QTY'] else r['QTY'], axis=1)
+                    df_out['ITEM_DESC'] = df_out.apply(lambda r: desc_mapping.get(clean_dpci_for_map(r['DPCI']), "") if not r['ITEM_DESC'] else r['ITEM_DESC'], axis=1)
 
                     df_out['Factory Name'] = df_out['Factory Name'].replace('', 'Unknown Factory')
+                    df_out['Factory Name'] = df_out['Factory Name'].fillna('Unknown Factory')
 
                     df_out.sort_values(by='Factory Name', inplace=True)
                     df_out.reset_index(drop=True, inplace=True)
@@ -277,9 +306,7 @@ if uploaded_files:
                     for col in target_columns:
                         if col not in df_out.columns: df_out[col] = ""
 
-                    # ---------------------------------------------------------
-                    # 步驟 D: XlsxWriter 進階排版與 ZIP 圖片精準配對
-                    # ---------------------------------------------------------
+                    # --- 6. XlsxWriter 進階排版與 ZIP 圖片綁定 ---
                     output = io.BytesIO()
                     img_insert_count = 0
                     
@@ -291,8 +318,7 @@ if uploaded_files:
                         def get_fmt(t=1, b=1, l=1, r=1, align=None):
                             key = (t, b, l, r, align)
                             if key not in format_cache:
-                                props = {'font_name': 'Arial', 'valign': 'vcenter', 'text_wrap': True,
-                                         'top': t, 'bottom': b, 'left': l, 'right': r}
+                                props = {'font_name': 'Arial', 'valign': 'vcenter', 'text_wrap': True, 'top': t, 'bottom': b, 'left': l, 'right': r}
                                 if align: props['align'] = align
                                 format_cache[key] = workbook.add_format(props)
                             return format_cache[key]
@@ -331,11 +357,11 @@ if uploaded_files:
                                 safe_name = "".join(x for x in dpci_val if x.isalnum() or x in "-_")
                                 if safe_name.endswith('.0'): safe_name = safe_name[:-2]
                                 
-                                # 🔍 在 ZIP 解壓縮的資料夾中尋找對應檔名的圖片
                                 img_path = None
                                 search_names = [
                                     f"{safe_name}.png", f"{safe_name}.jpg", f"{safe_name}.jpeg",
-                                    f"{dpci_val.lower()}.png", f"{dpci_val.lower()}.jpg", f"{dpci_val.lower()}.jpeg"
+                                    f"{dpci_val.lower()}.png", f"{dpci_val.lower()}.jpg", f"{dpci_val.lower()}.jpeg",
+                                    f"{dpci_val}.png", f"{dpci_val}.jpg", f"{dpci_val}.jpeg"
                                 ]
                                 for root, dirs, files in os.walk(temp_dir):
                                     for file in files:
@@ -383,7 +409,7 @@ if uploaded_files:
 
                     processed_data = output.getvalue()
                     
-                    st.success(f"✅ 處理完成！共解析出 **{len(df_out)}** 筆商品，並成功置入 **{img_insert_count}** 張圖片。")
+                    st.success(f"✅ 處理完成！共解析出 **{len(df_out)}** 筆商品，並從 ZIP 檔中成功置入 **{img_insert_count}** 張圖片。")
                     
                     st.download_button(
                         label="📥 下載 Item Tracking Grid.xlsx",
@@ -393,7 +419,7 @@ if uploaded_files:
                     )
                     
                 except Exception as e:
-                    st.error(f"❌ 處理檔案時發生內部錯誤: {str(e)}")
+                    st.error(f"❌ 處理檔案時發生錯誤: {str(e)}")
 
 else:
     st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案與圖片 ZIP 檔。")
