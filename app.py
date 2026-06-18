@@ -8,26 +8,25 @@ import openpyxl
 from openpyxl_image_loader import SheetImageLoader
 from openpyxl.utils import get_column_letter
 from PIL import Image
-import re
 
 # ==========================================
 # 1. 頁面基本設定與標題
 # ==========================================
 st.set_page_config(page_title="D240 Item Tracking Grid Generator", layout="wide")
 st.title("🎃 D240 Item Tracking Grid自動生成工具 ")
-st.markdown("請上傳 **Workspace 匯出檔 (Products.csv/xlsx)** 與 **Data 表**。系統將精準解析表格並自動排版。")
+st.markdown("請上傳專案檔案。系統將以 **Program Sheet** 為主視覺抓取圖片與排版，並自動從 **Data 表** 補齊缺失的工廠或數量資訊。")
 
 # ==========================================
 # 2. 檔案上傳與選項
 # ==========================================
 st.markdown("### 📄 步驟 1：上傳資料檔案")
-uploaded_files = st.file_uploader("📁 請將 [Workspace 匯出檔] 與 [Data 表] 一同拖曳至此", 
+uploaded_files = st.file_uploader("📁 請將 [Program Sheet] 與 [Data 表] 一同拖曳至此", 
                                   type=["xlsx", "xls", "csv"], 
                                   accept_multiple_files=True)
 
 st.markdown("### 🖼️ 步驟 2：選擇圖片來源")
 img_option = st.radio("請選擇您的圖片提供方式：", [
-    "1. 📊 從 Workspace 檔案的 Thumbnail 欄位自動萃取",
+    "1. 🗂️ 從 Program / Master Sheet 卡片自動萃取 (自動大範圍掃描圖片)",
     "2. 📁 上傳 ZIP 壓縮檔 (檔名需對應 DPCI)"
 ])
 
@@ -37,41 +36,59 @@ if img_option.startswith("2"):
 
 st.divider() 
 
+# 數值清理輔助函數
+def clean_string(val):
+    return str(val).replace(' ', '').replace(':', '').replace('#', '').upper()
+
 # ==========================================
 # 3. 核心處理邏輯
 # ==========================================
 if uploaded_files:
-    workspace_file = None
+    master_file = None
     data_file = None
     
-    # 自動分類檔案
+    # 自動分類檔案 (防呆排除產出檔)
     for file in uploaded_files:
-        name_upper = file.name.upper()
-        if "WRK" in name_upper or "PRODUCT" in name_upper or "WORKSPACE" in name_upper:
-            workspace_file = file
-        elif "DATA" in name_upper or "2026" in name_upper or "68" in name_upper:
+        fname = file.name.upper()
+        if "TRACKING" in fname or "GRID" in fname or "AUTOMATED" in fname:
+            continue
+        if file.name.endswith('.csv') and ("DATA" in fname or "WRK" in fname):
             data_file = file
+            continue
+            
+        try:
+            xls_peek = pd.ExcelFile(io.BytesIO(file.getvalue()))
+            snames = [s.upper() for s in xls_peek.sheet_names]
+            if any("MASTER" in s for s in snames) or any("PROGRAM" in s for s in snames) or "PS" in snames:
+                master_file = file
+            if any("DATA" in s for s in snames) or any("PRODUCT" in s for s in snames):
+                data_file = file
+        except: pass
 
-    if not workspace_file and len(uploaded_files) > 0: workspace_file = uploaded_files[0]
+    # 若無法精準辨識，以附檔名盲猜
+    if not master_file and len(uploaded_files) > 0: master_file = uploaded_files[0]
     if not data_file and len(uploaded_files) > 1: data_file = uploaded_files[1]
 
     if st.button("✨ 智慧生成 Item Tracking Grid", type="primary"):
-        if not workspace_file:
-            st.error("❌ 找不到 Workspace 檔案！請確認有上傳包含商品清單的 Excel。")
+        if not master_file:
+            st.error("❌ 找不到 Program Sheet！請確認檔案是否正確。")
             st.stop()
             
-        with st.spinner("解析 Workspace 表格與自動排版中，請稍候..."):
+        with st.spinner("解析卡片、萃取圖片與資料 VLOOKUP 中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
-                    # --- 處理 ZIP 圖片包 ---
+                    # --- 處理 ZIP ---
                     if img_option.startswith("2") and uploaded_zip:
                         with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
                             zip_ref.extractall(temp_dir)
 
                     # ---------------------------------------------------------
-                    # 步驟 A: 建立 CATEGORY 對照字典 (Data 表)
+                    # 步驟 A: 建立 Data 表字典 (用於彌補卡片缺失的資訊)
                     # ---------------------------------------------------------
                     cat_mapping = {}
+                    fact_mapping = {}
+                    qty_mapping = {}
+                    
                     if data_file:
                         if data_file.name.endswith('.csv'):
                             df_data = pd.read_csv(io.BytesIO(data_file.getvalue()), header=None)
@@ -79,7 +96,7 @@ if uploaded_files:
                             xls_data = pd.ExcelFile(io.BytesIO(data_file.getvalue()))
                             target_sheet = xls_data.sheet_names[0]
                             for s in xls_data.sheet_names:
-                                if "DATA" in s.upper(): target_sheet = s; break
+                                if "DATA" in s.upper() or "PRODUCT" in s.upper(): target_sheet = s; break
                             df_data = pd.read_excel(xls_data, sheet_name=target_sheet, header=None)
                             
                         header_idx = -1
@@ -91,118 +108,151 @@ if uploaded_files:
                             df_data.columns = df_data.iloc[header_idx]
                             df_data = df_data.iloc[header_idx + 1:].reset_index(drop=True)
                             
-                            def normalize_col(col_name):
-                                return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
-                                
-                            cat_cols_map = {normalize_col(c): c for c in df_data.columns}
-                            dpci_col_cat = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
-                            subclass_col = cat_cols_map.get("SUBCLASSNAME")
+                            def norm_c(col_name): return str(col_name).replace('\n', '').replace('\r', '').replace(' ', '').upper()
+                            cat_cols_map = {norm_c(c): c for c in df_data.columns}
                             
-                            if dpci_col_cat and subclass_col:
-                                clean_dpci = df_data[dpci_col_cat].astype(str).str.replace("-", "").str.strip()
+                            dpci_col = cat_cols_map.get("DPCI", cat_cols_map.get("DPCI#"))
+                            sub_col = cat_cols_map.get("SUBCLASSNAME", cat_cols_map.get("CATEGORY"))
+                            fact_col = cat_cols_map.get("PRODUCTBUSINESSPARTNER", cat_cols_map.get("IMPORTVENDORNAME", cat_cols_map.get("VENDOR")))
+                            qty_col = cat_cols_map.get("TOTALUNITS", cat_cols_map.get("QTY", cat_cols_map.get("ENTTTLRCPTU")))
+                            
+                            if dpci_col:
+                                clean_dpci = df_data[dpci_col].astype(str).str.replace("-", "").str.strip()
                                 clean_dpci = clean_dpci.apply(lambda x: x[:-2] if x.endswith('.0') else x)
-                                cat_mapping = dict(zip(clean_dpci, df_data[subclass_col]))
+                                
+                                if sub_col: cat_mapping = dict(zip(clean_dpci, df_data[sub_col]))
+                                if fact_col: fact_mapping = dict(zip(clean_dpci, df_data[fact_col]))
+                                if qty_col: qty_mapping = dict(zip(clean_dpci, df_data[qty_col]))
 
                     # ---------------------------------------------------------
-                    # 步驟 B: 解析 Workspace 標準表格
+                    # 步驟 B: 解析 Program Sheet 卡片 (加入擴展掃描與容錯)
                     # ---------------------------------------------------------
                     parsed_items = []
                     
-                    if workspace_file.name.endswith('.csv'):
-                        df_wrk = pd.read_csv(io.BytesIO(workspace_file.getvalue()))
-                        # CSV 無法抓圖
-                    else:
-                        xls_wrk = pd.ExcelFile(io.BytesIO(workspace_file.getvalue()))
-                        w_sheet = xls_wrk.sheet_names[0]
-                        for s in xls_wrk.sheet_names:
-                            if "PRODUCT" in s.upper(): w_sheet = s; break
+                    xls_master = pd.ExcelFile(io.BytesIO(master_file.getvalue()))
+                    m_sheet = xls_master.sheet_names[-1]
+                    for s in xls_master.sheet_names:
+                        if "MASTER" in s.upper() or "PROGRAM" in s.upper() or "PS" in s.upper():
+                            m_sheet = s; break
                             
-                        wb = openpyxl.load_workbook(io.BytesIO(workspace_file.getvalue()), data_only=True)
-                        sheet = wb[w_sheet]
-                        
-                        # 將 Excel 轉換為 DataFrame 以利操作
-                        data = sheet.values
-                        cols = next(data)
-                        df_wrk = pd.DataFrame(data, columns=cols)
-                        
-                        # --- 抓取圖片 ---
-                        if img_option.startswith("1"):
-                            try:
-                                image_loader = SheetImageLoader(sheet)
-                                # 尋找 Thumbnail 所在的欄位索引 (Openpyxl 從 1 開始)
-                                thumb_col_idx = None
-                                desc_col_idx = None
+                    wb = openpyxl.load_workbook(io.BytesIO(master_file.getvalue()), data_only=True)
+                    sheet = wb[m_sheet]
+                    
+                    image_loader = None
+                    if img_option.startswith("1"):
+                        try: image_loader = SheetImageLoader(sheet)
+                        except: pass
+                    
+                    for r in range(1, sheet.max_row + 1):
+                        for c in range(1, sheet.max_column + 1):
+                            cell_val = sheet.cell(row=r, column=c).value
+                            if cell_val is None: continue
+                            
+                            val_clean = clean_string(cell_val)
+                            
+                            if val_clean == 'DPCI':
+                                # 抓取 DPCI (容許合併儲存格導致的偏移)
+                                dpci = str(sheet.cell(row=r, column=c+1).value).strip()
+                                if dpci.lower() == 'none' or dpci == "": 
+                                    dpci = str(sheet.cell(row=r, column=c+2).value).strip()
+                                if dpci.lower() == 'none': dpci = ""
+                                if not dpci: continue
                                 
-                                for c_idx, col_name in enumerate(cols, 1):
-                                    if str(col_name).strip().upper() == 'THUMBNAIL':
-                                        thumb_col_idx = c_idx
-                                    elif str(col_name).strip().upper() == 'PRODUCT DESCRIPTION':
-                                        desc_col_idx = c_idx
-                                        
-                                if thumb_col_idx and desc_col_idx:
-                                    thumb_letter = get_column_letter(thumb_col_idx)
-                                    for r in range(2, sheet.max_row + 1):
-                                        raw_desc = str(sheet.cell(row=r, column=desc_col_idx).value or "")
-                                        # 用正則表達式萃取 DPCI (格式: 000-00-0000)
-                                        match = re.search(r'\d{3}-\d{2}-\d{4}', raw_desc)
-                                        if match:
-                                            dpci = match.group()
-                                            safe_name = dpci.replace("-", "")
-                                            
-                                            img_cell = f"{thumb_letter}{r}"
+                                # --- 圖片無死角掃描 ---
+                                if img_option.startswith("1") and image_loader:
+                                    img_obj = None
+                                    # 擴大範圍：以 DPCI 為中心，往上 8 列，左右各 3 欄
+                                    for row_offset in range(-1, 8):
+                                        if r - row_offset < 1: continue
+                                        for col_offset in range(-2, 4):
+                                            c_idx = max(1, c + col_offset)
+                                            img_cell = f"{get_column_letter(c_idx)}{r - row_offset}"
                                             if image_loader.image_in(img_cell):
                                                 try:
                                                     img_obj = image_loader.get(img_cell)
-                                                    img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
+                                                    break
                                                 except: pass
-                            except Exception as e:
-                                st.warning(f"圖片載入警告: {e}")
-
-                    # 逐列解析 DataFrame 資料
-                    for index, row in df_wrk.iterrows():
-                        raw_desc = str(row.get('Product Description', ''))
-                        if raw_desc.lower() == 'nan' or raw_desc == '': continue
-                        
-                        # 從 Product Description 拆分 DPCI 與真實的 Description
-                        dpci = ""
-                        desc = raw_desc
-                        match = re.search(r'\d{3}-\d{2}-\d{4}', raw_desc)
-                        if match:
-                            dpci = match.group()
-                            # 將 DPCI 從描述中移除，只保留商品名稱
-                            desc = raw_desc.replace(dpci, '').strip()
-                            
-                        if not dpci: continue # 如果沒有 DPCI 視為無效行
-                        
-                        factory_name = str(row.get('Product Business Partner', row.get('Vendor', ''))).strip()
-                        if factory_name.lower() == 'nan': factory_name = ""
-                        
-                        # 擷取其他欄位 (依照 Workspace 欄位名稱映射)
-                        qty = str(row.get('Total Units', row.get('QTY', ''))).strip()
-                        if qty.lower() == 'nan' or qty.endswith('.0'): qty = qty.replace('.0', '')
-                        
-                        parsed_items.append({
-                            'DPCI': dpci,
-                            'ITEM_DESC': desc,
-                            'Factory Name': factory_name,
-                            'Factory ID': "", # Workspace 通常不含 Factory ID，若有需要可手動填或後續補 VLOOKUP
-                            'QTY': qty
-                        })
+                                        if img_obj: break
+                                        
+                                    if img_obj:
+                                        safe_name = "".join(x for x in dpci if x.isalnum() or x in "-_")
+                                        if safe_name.endswith('.0'): safe_name = safe_name[:-2]
+                                        try: img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
+                                        except: pass
+                                        
+                                # 往下掃描找 Description
+                                desc = ""
+                                for i in range(1, 15):
+                                    if r+i > sheet.max_row: break
+                                    c_val = clean_string(sheet.cell(row=r+i, column=c).value)
+                                    if 'DESCRIPTION' in c_val:
+                                        desc = str(sheet.cell(row=r+i, column=c+1).value).strip()
+                                        if desc.lower() == 'none' or desc == "": desc = str(sheet.cell(row=r+i, column=c+2).value).strip()
+                                        if desc.lower() == 'none': desc = ""
+                                        break
+                                            
+                                # 往下掃描找 QTY
+                                qty = ""
+                                for i in range(1, 15):
+                                    if r+i > sheet.max_row: break
+                                    found_qty = False
+                                    for j in range(c, min(c+8, sheet.max_column + 1)):
+                                        q_val = clean_string(sheet.cell(row=r+i, column=j).value)
+                                        if 'QTY' in q_val or 'CASEPACK' in q_val:
+                                            qty = str(sheet.cell(row=r+i, column=j+1).value).strip()
+                                            if qty.lower() == 'none' or qty == "": qty = str(sheet.cell(row=r+i, column=j+2).value).strip()
+                                            if qty.lower() == 'none': qty = ""
+                                            if qty.endswith('.0'): qty = qty[:-2]
+                                            found_qty = True; break
+                                    if found_qty: break
+                                    
+                                # 往下掃描找 Factory
+                                factory_name = ""
+                                factory_id = ""
+                                for i in range(1, 15):
+                                    if r+i > sheet.max_row: break
+                                    f_val = clean_string(sheet.cell(row=r+i, column=c).value)
+                                    if 'FACTORY' in f_val or 'VENDOR' in f_val:
+                                        raw_fact = str(sheet.cell(row=r+i, column=c).value).strip().replace('"', '')
+                                        if ':' in raw_fact: raw_fact = raw_fact.split(':', 1)[1].strip()
+                                        parts = raw_fact.split('/')
+                                        if len(parts) >= 1: factory_name = parts[0].strip()
+                                        if len(parts) >= 2: factory_id = parts[1].strip()
+                                        break
+                                        
+                                parsed_items.append({
+                                    'DPCI': dpci,
+                                    'ITEM_DESC': desc,
+                                    'Factory Name': factory_name,
+                                    'Factory ID': factory_id,
+                                    'QTY': qty
+                                })
 
                     if not parsed_items:
-                        st.warning("⚠️ 在檔案中找不到有效的商品資料。請確保有 'Product Description' 欄位且包含 DPCI 號碼。")
+                        st.warning("⚠️ 在 Program Sheet 中未偵測到 DPCI。請確認檔案內容。")
                         st.stop()
                     
                     df_out = pd.DataFrame(parsed_items)
 
                     # ---------------------------------------------------------
-                    # 步驟 C: VLOOKUP CATEGORY 與群組化排序
+                    # 步驟 C: 終極 VLOOKUP 補齊資料
                     # ---------------------------------------------------------
-                    if cat_mapping:
-                        clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
-                        df_out['CATEGORY'] = clean_main_dpci.map(cat_mapping).fillna('')
-                    else:
-                        df_out['CATEGORY'] = ""
+                    clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
+                    
+                    # 1. 補齊 Category
+                    if cat_mapping: df_out['CATEGORY'] = clean_main_dpci.map(cat_mapping).fillna('')
+                    else: df_out['CATEGORY'] = ""
+                    
+                    # 2. 如果 Program Sheet 沒寫工廠，從 Data 表補齊
+                    if fact_mapping:
+                        df_out['Factory Name'] = df_out.apply(lambda row: fact_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['Factory Name'] else row['Factory Name'], axis=1)
+                        
+                    # 3. 如果 Program Sheet 沒寫 QTY，從 Data 表補齊
+                    if qty_mapping:
+                        df_out['QTY'] = df_out.apply(lambda row: qty_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['QTY'] else row['QTY'], axis=1)
+
+                    # 若補齊後 Factory Name 仍為空，給予預設值以防群組化報錯
+                    df_out['Factory Name'] = df_out['Factory Name'].replace('', 'Unknown Factory')
 
                     df_out.sort_values(by='Factory Name', inplace=True)
                     df_out.reset_index(drop=True, inplace=True)
@@ -239,11 +289,11 @@ if uploaded_files:
                                 format_cache[key] = workbook.add_format(props)
                             return format_cache[key]
 
-                        # 1. 寫入 L1 紫色粗體總數
+                        # 1. L1 總數
                         fmt_total = workbook.add_format({'font_name': 'Arial', 'bold': True, 'font_color': '#800080', 'font_size': 12, 'align': 'center', 'valign': 'vcenter'})
                         worksheet.write(0, 11, len(df_out), fmt_total)
                         
-                        # 2. 寫入標題列
+                        # 2. 標題列
                         fmt_header = workbook.add_format({'bold': True, 'bg_color': '#FFD966', 'border': 1, 'font_name': 'Arial', 'valign': 'vcenter', 'text_wrap': True}) 
                         for c, col_name in enumerate(target_columns):
                             worksheet.write(1, c, col_name, fmt_header)
@@ -253,17 +303,18 @@ if uploaded_files:
                         worksheet.set_column(9, 9, 25) # Factory Name
                         worksheet.set_column(10, 10, 15) # Factory ID
                         
-                        # 3. 找出每個工廠群組
+                        # 3. 群組化
                         factories = df_out['Factory Name'].tolist()
                         groups = []
-                        start_idx = 0
-                        for i in range(1, len(factories)):
-                            if factories[i] != factories[start_idx]:
-                                groups.append((start_idx, i - 1, factories[start_idx]))
-                                start_idx = i
-                        groups.append((start_idx, len(factories) - 1, factories[start_idx]))
+                        if factories:
+                            start_idx = 0
+                            for i in range(1, len(factories)):
+                                if factories[i] != factories[start_idx]:
+                                    groups.append((start_idx, i - 1, factories[start_idx]))
+                                    start_idx = i
+                            groups.append((start_idx, len(factories) - 1, factories[start_idx]))
 
-                        # 4. 逐列寫入資料
+                        # 4. 寫入資料
                         excel_row_offset = 2 
                         for s_idx, e_idx, f_name in groups:
                             f_id = str(df_out.iloc[s_idx]['Factory ID']).strip()
@@ -274,6 +325,7 @@ if uploaded_files:
                                 
                                 dpci_val = str(df_out.iloc[i]['DPCI']).strip()
                                 safe_name = "".join(x for x in dpci_val if x.isalnum() or x in "-_")
+                                if safe_name.endswith('.0'): safe_name = safe_name[:-2]
                                 
                                 img_path = None
                                 search_names = [f"{safe_name}.png", f"{safe_name}.jpg", f"{dpci_val.lower()}.png"]
@@ -306,15 +358,13 @@ if uploaded_files:
                                                     img_insert_count += 1
                                             except: pass
                                             
-                                    elif c == 11: # Total SKU per Factory
-                                        if i == s_idx:
-                                            worksheet.write(excel_row, c, e_idx - s_idx + 1, fmt)
-                                        else:
-                                            worksheet.write(excel_row, c, "", fmt)
+                                    elif c == 11: # Total SKU
+                                        if i == s_idx: worksheet.write(excel_row, c, e_idx - s_idx + 1, fmt)
+                                        else: worksheet.write(excel_row, c, "", fmt)
                                     else:
                                         worksheet.write(excel_row, c, df_out.iloc[i][col_name], fmt)
                                         
-                            # 單獨處理 Factory Name 與 ID 的合併及粗邊框
+                            # 垂直合併與外框
                             fmt_fact = get_fmt(t=2, b=2, l=1, r=1, align='center')
                             if s_idx == e_idx:
                                 worksheet.write(s_idx + excel_row_offset, 9, f_name, fmt_fact)
@@ -338,4 +388,4 @@ if uploaded_files:
                     st.error(f"❌ 處理檔案時發生錯誤: {e}")
 
 else:
-    st.info("💡 提示：請在上方直接拖曳上傳您的 Workspace 匯出檔與 Data 表。")
+    st.info("💡 提示：請在上方直接拖曳上傳您的專案 Excel/CSV 檔案 (包含 Program Sheet 與 Data)。")
