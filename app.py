@@ -11,10 +11,53 @@ from openpyxl.utils.cell import coordinate_from_string, column_index_from_string
 from PIL import Image
 
 # ==========================================
-# 1. 頁面基本設定與標題
+# 0. 頁面基本設定
 # ==========================================
 st.set_page_config(page_title="D240 Item Tracking Grid Generator", layout="wide")
-st.title("🎃 D240 Item Tracking Grid自動生成工具")
+
+# ==========================================
+# 0. 密碼保護機制
+# ==========================================
+def check_password():
+    """回傳 True 代表使用者輸入了正確的密碼"""
+    def password_entered():
+        if st.session_state["password"] == st.secrets["app_password"]:
+            st.session_state["password_correct"] = True
+            del st.session_state["password"]  
+        else:
+            st.session_state["password_correct"] = False
+
+    if "password_correct" not in st.session_state:
+        st.title("🔒 系統登入")
+        st.text_input(
+            "🔒 請輸入 AE 部門共用密碼以啟用工具：", 
+            type="password", 
+            on_change=password_entered, 
+            key="password"
+        )
+        return False
+    
+    elif not st.session_state["password_correct"]:
+        st.title("🔒 系統登入")
+        st.text_input(
+            "🔒 請輸入 AE 部門共用密碼以啟用工具：", 
+            type="password", 
+            on_change=password_entered, 
+            key="password"
+        )
+        st.error("❌ 密碼錯誤，請重新輸入。")
+        return False
+    else:
+        return True
+
+# 如果密碼驗證未通過，則阻擋往下執行
+if not check_password():
+    st.stop()
+
+# ==========================================
+# 1. 主程式標題 
+# ==========================================
+st.title("🎃 D240 Item Tracking Grid自動生成工具 (穩定適應版)")
 st.markdown("請上傳專案檔案。系統將以 **Program Sheet** 為主視覺抓取圖片與排版，並自動從 **Data 表** 補齊缺失的工廠或數量資訊。")
 
 # ==========================================
@@ -37,7 +80,6 @@ if img_option.startswith("2"):
 
 st.divider() 
 
-# 數值清理輔助函數
 def clean_string(val):
     return str(val).replace(' ', '').replace(':', '').replace('#', '').upper()
 
@@ -48,7 +90,6 @@ if uploaded_files:
     master_file = None
     data_file = None
     
-    # 自動分類檔案 (防呆排除產出檔)
     for file in uploaded_files:
         fname = file.name.upper()
         if "TRACKING" in fname or "GRID" in fname or "AUTOMATED" in fname:
@@ -66,7 +107,6 @@ if uploaded_files:
                 data_file = file
         except: pass
 
-    # 若無法精準辨識，以附檔名盲猜
     if not master_file and len(uploaded_files) > 0: master_file = uploaded_files[0]
     if not data_file and len(uploaded_files) > 1: data_file = uploaded_files[1]
 
@@ -78,23 +118,25 @@ if uploaded_files:
         with st.spinner("解析卡片、萃取圖片與資料 VLOOKUP 中，請稍候..."):
             with tempfile.TemporaryDirectory() as temp_dir:
                 try:
-                    # --- 處理 ZIP ---
+                    # --- 安全處理 ZIP ---
                     if img_option.startswith("2") and uploaded_zip:
-                        with zipfile.ZipFile(uploaded_zip, 'r') as zip_ref:
+                        zip_io = io.BytesIO(uploaded_zip.getvalue())
+                        with zipfile.ZipFile(zip_io, 'r') as zip_ref:
                             zip_ref.extractall(temp_dir)
 
                     # ---------------------------------------------------------
-                    # 步驟 A: 建立 Data 表字典 (用於彌補卡片缺失的資訊)
+                    # 步驟 A: 建立 Data 表字典
                     # ---------------------------------------------------------
                     cat_mapping = {}
                     fact_mapping = {}
                     qty_mapping = {}
                     
                     if data_file:
+                        data_io = io.BytesIO(data_file.getvalue()) 
                         if data_file.name.endswith('.csv'):
-                            df_data = pd.read_csv(io.BytesIO(data_file.getvalue()), header=None)
+                            df_data = pd.read_csv(data_io, header=None)
                         else:
-                            xls_data = pd.ExcelFile(io.BytesIO(data_file.getvalue()))
+                            xls_data = pd.ExcelFile(data_io)
                             target_sheet = xls_data.sheet_names[0]
                             for s in xls_data.sheet_names:
                                 if "DATA" in s.upper() or "PRODUCT" in s.upper(): target_sheet = s; break
@@ -130,13 +172,16 @@ if uploaded_files:
                     # ---------------------------------------------------------
                     parsed_items = []
                     
-                    xls_master = pd.ExcelFile(io.BytesIO(master_file.getvalue()))
+                    master_io_pd = io.BytesIO(master_file.getvalue()) 
+                    master_io_px = io.BytesIO(master_file.getvalue()) 
+                    
+                    xls_master = pd.ExcelFile(master_io_pd)
                     m_sheet = xls_master.sheet_names[-1]
                     for s in xls_master.sheet_names:
                         if "MASTER" in s.upper() or "PROGRAM" in s.upper() or "PS" in s.upper():
                             m_sheet = s; break
                             
-                    wb = openpyxl.load_workbook(io.BytesIO(master_file.getvalue()), data_only=True)
+                    wb = openpyxl.load_workbook(master_io_px, data_only=True)
                     sheet = wb[m_sheet]
                     
                     image_loader = None
@@ -159,13 +204,13 @@ if uploaded_files:
                                 if not dpci: continue
                                 
                                 # ==========================================
-                                # 🖼️ 全新雙層圖片搜尋邏輯 (適應各種錨點偏移)
+                                # 🖼️ 全新防死鎖圖片搜尋與儲存 
                                 # ==========================================
                                 img_obj = None
                                 if img_option.startswith("1") and image_loader:
                                     found_img_cell = None
                                     
-                                    # [第一層] 擴大雷達掃描：以 DPCI 為中心，往上掃 16 列，左右各掃 8 欄
+                                    # 第一層：雷達掃描
                                     for row_offset in range(-2, 17):
                                         for col_offset in range(-4, 9):
                                             c_idx = max(1, c + col_offset)
@@ -177,9 +222,12 @@ if uploaded_files:
                                         if found_img_cell: break
                                         
                                     if found_img_cell:
-                                        img_obj = image_loader.get(found_img_cell)
+                                        try:
+                                            raw_img = image_loader.get(found_img_cell)
+                                            img_obj = raw_img.copy() 
+                                        except: pass
                                     else:
-                                        # [第二層] 智慧距離計算：搜尋整張表所有圖片，找出位於此卡片上方且距離最近的圖片
+                                        # 第二層：距離計算
                                         try:
                                             min_dist = 9999
                                             closest_cell = None
@@ -190,7 +238,6 @@ if uploaded_files:
                                                 row_diff = r - row_num
                                                 col_diff = abs(c - img_col_idx)
                                                 
-                                                # 圖片必須位於 DPCI 上方 (或同一列)，且不可離太遠
                                                 if 0 <= row_diff <= 30 and col_diff <= 12:
                                                     dist = row_diff + col_diff
                                                     if dist < min_dist:
@@ -198,17 +245,17 @@ if uploaded_files:
                                                         closest_cell = img_c
                                                         
                                             if closest_cell:
-                                                img_obj = image_loader.get(closest_cell)
+                                                raw_img = image_loader.get(closest_cell)
+                                                img_obj = raw_img.copy() 
                                         except: pass
                                         
-                                    # 儲存找到的圖片
                                     if img_obj:
                                         safe_name = "".join(x for x in dpci if x.isalnum() or x in "-_")
                                         if safe_name.endswith('.0'): safe_name = safe_name[:-2]
-                                        try: img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
+                                        try: 
+                                            img_obj.save(os.path.join(temp_dir, f"{safe_name}.png"), "PNG")
                                         except: pass
                                         
-                                # 往下掃描找 Description
                                 desc = ""
                                 for i in range(1, 15):
                                     if r+i > sheet.max_row: break
@@ -219,7 +266,6 @@ if uploaded_files:
                                         if desc.lower() == 'none': desc = ""
                                         break
                                             
-                                # 往下掃描找 QTY
                                 qty = ""
                                 for i in range(1, 15):
                                     if r+i > sheet.max_row: break
@@ -234,7 +280,6 @@ if uploaded_files:
                                             found_qty = True; break
                                     if found_qty: break
                                     
-                                # 往下掃描找 Factory
                                 factory_name = ""
                                 factory_id = ""
                                 for i in range(1, 15):
@@ -267,19 +312,15 @@ if uploaded_files:
                     # ---------------------------------------------------------
                     clean_main_dpci = df_out['DPCI'].astype(str).str.replace('-', '').str.strip()
                     
-                    # 1. 補齊 Category
                     if cat_mapping: df_out['CATEGORY'] = clean_main_dpci.map(cat_mapping).fillna('')
                     else: df_out['CATEGORY'] = ""
                     
-                    # 2. 如果 Program Sheet 沒寫工廠，從 Data 表補齊
                     if fact_mapping:
                         df_out['Factory Name'] = df_out.apply(lambda row: fact_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['Factory Name'] else row['Factory Name'], axis=1)
                         
-                    # 3. 如果 Program Sheet 沒寫 QTY，從 Data 表補齊
                     if qty_mapping:
                         df_out['QTY'] = df_out.apply(lambda row: qty_mapping.get(str(row['DPCI']).replace('-', ''), "") if not row['QTY'] else row['QTY'], axis=1)
 
-                    # 若補齊後 Factory Name 仍為空，給予預設值以防群組化報錯
                     df_out['Factory Name'] = df_out['Factory Name'].replace('', 'Unknown Factory')
 
                     df_out.sort_values(by='Factory Name', inplace=True)
